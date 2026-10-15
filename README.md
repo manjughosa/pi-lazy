@@ -1,9 +1,16 @@
-# @rahularya01/pi-lazy
+# pi-lazy (maintained fork)
 
 [![npm version](https://img.shields.io/npm/v/@rahularya01/pi-lazy?logo=npm)](https://www.npmjs.com/package/@rahularya01/pi-lazy)
+[![fork status](https://img.shields.io/badge/fork%20status-maintained-brightgreen)](https://github.com/manjughosa/pi-lazy)
+[![upstream last commit](https://img.shields.io/github/last-commit/Rahularya01/pi-lazy?label=upstream%20last%20commit)](https://github.com/Rahularya01/pi-lazy)
 [![license](https://img.shields.io/npm/l/@rahularya01/pi-lazy)](LICENSE)
 
 **A LazyVim-style extension manager for [Pi Coding Agent](https://github.com/badlogic/pi-mono).**
+
+> **This is a maintained fork.** Upstream `@rahularya01/pi-lazy` v0.3.1 (commit `fd4910a`,
+> 2026-08-27) has not received a new commit in over two months and the issue queue is piling up.
+> See [Why a fork?](#why-a-fork) and [CHANGELOG.md](CHANGELOG.md) for what this fork adds and how
+> patches flow back.
 
 If you've used [LazyVim](https://www.lazyvim.org/), the idea will feel familiar: keep every
 package installed, but only pay the startup cost for the ones you actually use right away.
@@ -12,6 +19,41 @@ your prompt, a shortcut, or a manual `/lazy load`.
 
 **The result:** a faster Pi startup, a shorter tool list for the model to reason about, and every
 package still just one command or keyword away.
+
+## Why a fork?
+
+| | Upstream | This fork (`manjughosa/pi-lazy`) |
+|---|---|---|
+| Last commit | 2026-08-27 (over 2 months stale) | tracked, every release gets a CHANGELOG entry |
+| Open issues answered | unmaintained | 11 patches, 2 issues filed, all addressed |
+| Compatibility with `pi-extmgr` | breaks lazy semantics | `ensureManagerCompat` auto-patches on session_start |
+| Compatibility with `pi-powerline-footer` | clobbers the status line twice | `ensureFooterCompat` auto-patches the fast-welcome path |
+| Doctor / diagnostic | absent | `/lazy doctor` checks settings, lazy state, extmgr conflicts |
+| `auto: true` default | yes (loaded eagerly on session start) | no (`auto: false`; opt-in per spec) |
+| Typebox collision warning | yes (duplicate Host-provided instance) | peer-dependency only, no collision |
+| Built-in default config | ships 5 ghost package entries | trimmed to the 5 that actually exist |
+
+### Maintenance policy
+
+- **Patches flow in from local use** — this fork exists because the maintainer (you) uses it
+  daily. Every behavior change that lands in `dist/index.js` is mirrored back to `src/` and
+  shows up in `CHANGELOG.md` under the next minor version.
+- **Backports from upstream** — if the original `@rahularya01/pi-lazy` repo gets a new commit,
+  it's cherry-picked into the next `0.4.x` patch release.
+- **Releases are tagged** — every release is a signed `vX.Y.Z` git tag on `main`; install via
+  `git:github.com/manjughosa/pi-lazy` if you want pin-to-version behavior, or stay on the local
+  `dist/index.js` for zero-network startup (recommended for performance — see [Install](#install)).
+- **No silent breaking changes** — see the [CHANGELOG](CHANGELOG.md). Every release notes which
+  upstream version it forked from and what was added/changed/fixed.
+
+### Install paths and their trade-offs
+
+| `source` in `settings.json` | Network on every Pi start? | Recommended? |
+|---|---|---|
+| `E:/pi-agent/agent/extensions/pi-lazy` (local dist) | **No** | **Yes — fastest** |
+| `git:github.com/manjughosa/pi-lazy` | Yes (`git fetch` + checkout) | only when you need pin-to-version |
+| `npm:@rahularya01/pi-lazy` | Yes (npm registry) | No — that is the stale upstream |
+| `npm:@manjughosa/pi-lazy` | Yes (npm registry) | only after the fork is republished under a new name |
 
 ## Table of contents
 
@@ -39,15 +81,17 @@ package still just one command or keyword away.
 
 ## Install
 
-```bash
-# from npm
-pi install npm:@rahularya01/pi-lazy
+Pick the path that matches your performance budget (see [Install paths and their trade-offs](#install-paths-and-their-trade-offs)):
 
-# from a local checkout
+```bash
+# local checkout — zero network, fastest startup (recommended)
 pi install /absolute/path/to/pi-lazy
 
-# from git
-pi install git:github.com/Rahularya01/pi-lazy
+# pin-to-version via this fork's git tag
+pi install git:github.com/manjughosa/pi-lazy
+
+# upstream npm (stale — use the fork instead)
+pi install npm:@rahularya01/pi-lazy
 ```
 
 Or add it directly to `~/.pi/agent/settings.json`:
@@ -572,28 +616,34 @@ Layout:
 
 ## Publish
 
-CI runs the hermetic test suite, typecheck, build, production dependency audit, and
-package-content verification on Node 20, 22, and 24.
+### This fork (manjughosa/pi-lazy)
 
-Releases publish to npm automatically when a version tag is pushed:
+Release flow used for 0.4.0 and onwards:
 
-```bash
-# 1. Bump version in package.json + CHANGELOG.md, commit to main
-# 2. Tag must match package.json (e.g. 0.1.1 → v0.1.1)
-git tag v0.1.1
-git push origin main --tags
-```
+1. Bump `version` in `package.json` to `X.Y.Z`, mirror that in a new `## [X.Y.Z] — YYYY-MM-DD`
+   section in `CHANGELOG.md` (with a "Diff vs upstream" table when it is a fork release).
+2. Commit on `main` with a message like `release X.Y.Z (fork)`.
+3. Tag must match `package.json` exactly: `git tag -a vX.Y.Z -m "..."`.
+4. Push: `git push origin main --tags`.
 
-GitHub Actions (`.github/workflows/publish.yml`) will:
+GitHub Actions will:
+- Run `npm run typecheck` + `npm test` + `npm run build`.
+- Build a tarball and verify its content.
+- Publish to **npm under `@manjughosa/pi-lazy`** (the new name) — this requires
+  `NPM_TOKEN_FOR_MANJUGHOSA` in repo secrets, separate from the upstream token.
 
-1. Install deps and run `npm run check`
-2. Assert the tag matches `package.json` version
-3. `npm publish --access public --provenance`
+> The upstream `@rahularya01/pi-lazy` npm package is **not** touched. If you want to keep using
+> the upstream name, fork the publish workflow and point it at your own npm scope.
 
-**Required secret:** repo `NPM_TOKEN` (npm automation/granular access token with publish rights
-for `@rahularya01`).
+### Backporting from upstream
 
-Manual publish (fallback):
+When `@rahularya01/pi-lazy` gets a new commit:
+1. `git remote add upstream git@github.com:Rahularya01/pi-lazy.git` (one-time).
+2. `git fetch upstream`.
+3. Identify the upstream commit range since `fd4910a` (the fork base).
+4. Cherry-pick onto `main`, run `npm test`, then patch-release as `0.4.x`.
+
+### Manual publish (fallback for any of the above)
 
 ```bash
 npm login
@@ -603,8 +653,12 @@ npm publish --access public
 Then reinstall in Pi:
 
 ```bash
-pi install npm:@rahularya01/pi-lazy
+pi install /absolute/path/to/pi-lazy   # or npm:@manjughosa/pi-lazy once published
 ```
+
+### Required CI secret
+- `NPM_TOKEN_FOR_MANJUGHOSA` — npm automation/granular access token with publish rights
+  for `@manjughosa` (the original `NPM_TOKEN` for `@rahularya01` is irrelevant to this fork).
 
 ## License
 
