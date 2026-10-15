@@ -43,7 +43,7 @@ package still just one command or keyword away.
   so a change and its commit are never two steps apart. This repo previously had to be kept in sync
   with a separate `pi-lazy-fork/` copy; that duplicate is gone.
 - **Backports from upstream** — if the original `@rahularya01/pi-lazy` repo gets a new commit,
-  it's cherry-picked into the next `0.4.x` patch release.
+  it's cherry-picked into the next `0.5.x` patch release.
 - **Releases are tagged** — every release is a signed `vX.Y.Z` git tag on `main`; install via
   `git:github.com/manjughosa/pi-lazy` if you want pin-to-version behavior, or stay on the local
   `dist/index.js` for zero-network startup (recommended for performance — see [Install](#install)).
@@ -660,7 +660,7 @@ When `@rahularya01/pi-lazy` gets a new commit:
 1. `git remote add upstream git@github.com:Rahularya01/pi-lazy.git` (one-time).
 2. `git fetch upstream`.
 3. Identify the upstream commit range since `fd4910a` (the fork base).
-4. Cherry-pick onto `main`, run `npm test`, then patch-release as `0.4.x`.
+4. Cherry-pick onto `main`, run `npm test`, then patch-release as `0.5.x`.
 
 ### Manual publish (fallback for any of the above)
 

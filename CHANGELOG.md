@@ -13,6 +13,14 @@ How to read this file:
 
 ## [Unreleased]
 
+(none yet)
+
+## 0.5.0 — 2026-10-15
+
+Minor bump because `/lazy init` changed observable behavior (it no longer replaces the catalog),
+which is a breaking change for anyone who used it as a reset. Released together with the tree
+consolidation: the live extension and this repository are now the same directory.
+
 ### Added
 
 - **`/lazy scan`** (alias `/lazy s`) — merges packages present in `settings.json` but missing from
@@ -37,11 +45,17 @@ How to read this file:
   `["+index.ts"]` or `["-extensions/goal.ts"]`) are left alone. Those already state an intent, and
   inferring `cmd`/`keywords` for an unknown extension would be guesswork — this also means disabled
   packages marked with exclusion filters are never re-enabled by `init`.
+- Repository layout: `src/` now ships with the live extension, so behavior is changed in TypeScript
+  and rebuilt with `npm run build`. The separate `pi-lazy-fork/` copy this used to be mirrored from
+  is gone; `extensions/pi-lazy` holds `src/`, `dist/`, and the git history together.
 
 ### Notes for maintainers
 
 - `dist/index.js` is a bundle of `src/*.ts`. Rebuild with `npm run build` after any `src/` change;
   editing only `src/` has no effect and raises no error.
+- Never place backups or scratch copies under `agent/extensions/` — Pi loads every package found
+  there regardless of directory name, and a second copy of pi-lazy collides with the first on tool
+  registration. Keep backups outside that directory.
 
 ## 0.4.0 — 2026-10-15
 
