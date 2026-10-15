@@ -883,6 +883,43 @@ function sourcesMatch(left, right) {
 function findSettingsPackageIndex(settingsPackages, source) {
   return findSettingsPackageIndices(settingsPackages, source)[0] ?? -1;
 }
+function discoverSpecsFromSettings(settingsPackages, existing) {
+  const covered = new Set(existing.map((spec) => normalizeSourceKey(spec.source)));
+  const discovered = [];
+  const seen = /* @__PURE__ */ new Set();
+  settingsPackages.forEach((entry) => {
+    let source;
+    let extensionFilter;
+    if (typeof entry === "string") {
+      source = entry;
+    } else if (entry && typeof entry === "object" && typeof entry.source === "string") {
+      source = entry.source;
+      extensionFilter = entry.extensions;
+    } else {
+      return;
+    }
+    const key = normalizeSourceKey(source);
+    if (covered.has(key) || seen.has(key)) return;
+    seen.add(key);
+    if (Array.isArray(extensionFilter) && extensionFilter.length > 0) return;
+    discovered.push({
+      name: specNameFromSource(source),
+      source,
+      lazy: true,
+      keywords: [specNameFromSource(source)],
+      description: "auto-discovered from settings.json \u2014 tune priority/cmd by hand"
+    });
+  });
+  return discovered;
+}
+function specNameFromSource(source) {
+  const bare = source.startsWith("npm:") ? source.slice(4) : source;
+  const name = npmPackageName(source);
+  if (name) return name;
+  const normalized = bare.replace(/\\/g, "/").replace(/\/+$/, "");
+  const segments = normalized.split("/").filter(Boolean);
+  return segments[segments.length - 1] ?? bare;
+}
 function findSettingsPackageIndices(settingsPackages, source) {
   const indices = [];
   settingsPackages.forEach((entry, index) => {
@@ -1081,6 +1118,53 @@ function formatStatus(rt) {
   if (errors) parts.push(`${errors}\u2717`);
   if (rt.restartRequired) parts.push("restart required");
   return parts.join(" ");
+}
+function scanIntoConfig(pi, rt, ctx, agentDir) {
+  const currentPath = getLazyConfigPath(agentDir);
+  const hadExisting = existsSync5(currentPath);
+  const existingConfig = hadExisting ? loadConfig(agentDir) : defaultConfig();
+  const before = existingConfig.specs.length;
+  const settingsPath = getSettingsPath(agentDir);
+  let packages = [];
+  let settingsWarning = "";
+  if (existsSync5(settingsPath)) {
+    try {
+      const parsed = JSON.parse(readFileSync5(settingsPath, "utf-8"));
+      packages = parsed && typeof parsed === "object" && Array.isArray(parsed.packages) ? parsed.packages : [];
+    } catch (err) {
+      settingsWarning = `settings.json could not be read: ${err instanceof Error ? err.message : String(err)}`;
+    }
+  } else {
+    settingsWarning = "settings.json not found \u2014 no packages could be scanned.";
+  }
+  const discovered = discoverSpecsFromSettings(packages, existingConfig.specs);
+  const next = { ...existingConfig, specs: [...existingConfig.specs, ...discovered] };
+  let backup = "";
+  if (hadExisting) {
+    const stamp = (/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-");
+    backup = `${currentPath}.bak.init-${stamp}`;
+    copyFileSync2(currentPath, backup);
+  }
+  const path = saveConfig(next, agentDir);
+  rt.restartRequired = true;
+  rt.config = next;
+  refreshStatus(pi, rt, ctx);
+  const lines = [];
+  if (!hadExisting) {
+    lines.push(`no lazy.json found \u2014 created ${path} with default specs (${before}).`);
+  } else {
+    lines.push(`kept ${before} existing spec${before === 1 ? "" : "s"} \u2192 ${path}${backup ? `
+backup: ${backup}` : ""}`);
+  }
+  if (discovered.length === 0) {
+    lines.push("no new packages to add \u2014 config already covers settings.json.");
+  } else {
+    lines.push(`added ${discovered.length} discovered package${discovered.length === 1 ? "" : "s"}:`);
+    for (const spec of discovered) lines.push(`  + ${spec.name}`);
+    lines.push("tune priority / cmd / lazy mode by hand \u2014 defaults are lazy:true.");
+  }
+  if (settingsWarning) lines.push(settingsWarning);
+  return lines;
 }
 function refreshStatus(pi, rt, ctx) {
   rt.status = formatStatus(rt);
@@ -1679,9 +1763,9 @@ function createPiLazy(pi, agentDir = getAgentDir4()) {
     drainResumeWaiters(rt);
   });
   pi.registerCommand("lazy", {
-    description: "LazyVim-style extension manager (list|load|migrate|auto|init|status|doctor)",
+    description: "LazyVim-style extension manager (list|load|migrate|auto|init|scan|status|doctor)",
     getArgumentCompletions: (prefix) => {
-      const sub = ["status", "list", "load", "migrate", "auto", "init", "config", "profile", "doctor"];
+      const sub = ["status", "list", "load", "migrate", "auto", "init", "scan", "config", "profile", "doctor"];
       const names = [...rt.entries.keys()].map((n) => `load ${n}`);
       const items = [...sub, ...names, "auto on", "auto off"].map((v) => ({ value: v, label: v }));
       const filtered = items.filter((i) => i.value.startsWith(prefix) || i.value.includes(prefix));
@@ -1715,21 +1799,35 @@ function createPiLazy(pi, agentDir = getAgentDir4()) {
         ctx.ui.notify(lines.join("\n"), "info");
         return;
       }
+      if (sub === "scan" || sub === "s") {
+        try {
+          scanIntoConfig(pi, rt, ctx, agentDir);
+        } catch (err) {
+          ctx.ui.notify(`scan failed: ${err instanceof Error ? err.message : String(err)}`, "error");
+        }
+        return;
+      }
       if (sub === "init") {
         try {
-          const currentPath = getLazyConfigPath(agentDir);
-          let backup = "";
-          if (existsSync5(currentPath)) {
-            const stamp = (/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-");
-            backup = `${currentPath}.bak.init-${stamp}`;
-            copyFileSync2(currentPath, backup);
-          }
-          const path = saveConfig(defaultConfig(), agentDir);
+          const scanLines = scanIntoConfig(pi, rt, ctx, agentDir);
+          const result = migrateSettings(agentDir);
           rt.restartRequired = true;
-          refreshStatus(pi, rt, ctx);
-          ctx.ui.notify(`wrote default config \u2192 ${path}${backup ? `
-backup: ${backup}` : ""}
-Reload or restart Pi to apply it.`, "info");
+          const lines = [...scanLines, "", "\u2500\u2500 migrate \u2500\u2500"];
+          if (!result.ok) {
+            lines.push(`migrate failed: ${result.error}`);
+          } else {
+            lines.push(`settings \u2192 ${result.settingsPath}`);
+            if (result.changed.length > 0) {
+              lines.push(`made lazy (${result.changed.length}): ${result.changed.join(", ")}`);
+            } else {
+              lines.push("nothing to change in settings.json \u2014 already in sync.");
+            }
+            if (result.skipped.length > 0) {
+              lines.push(`skipped (${result.skipped.length}): ${result.skipped.join(", ")}`);
+            }
+            lines.push("Reload or restart Pi to apply it.");
+          }
+          ctx.ui.notify(lines.join("\n"), result.ok ? "info" : "warning");
         } catch (err) {
           ctx.ui.notify(`failed to initialize config: ${err instanceof Error ? err.message : String(err)}`, "error");
         }
@@ -1797,7 +1895,7 @@ Reload or restart Pi to apply it.`, "info");
         );
         return;
       }
-      ctx.ui.notify("usage: /lazy [status|list|profile|load <name>|migrate|auto on|off|init|config]", "warning");
+      ctx.ui.notify("usage: /lazy [status|list|profile|load <name>|init|scan|migrate|auto on|off|config]", "warning");
     }
   });
   pi.registerTool({

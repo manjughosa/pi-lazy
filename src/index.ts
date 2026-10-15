@@ -21,9 +21,9 @@ import {
 } from "./config.ts";
 import { loadResolvedEntry, prefetchEntry } from "./loader.ts";
 import { migrateSettings } from "./migrate.ts";
-import { isModuleLazyInSettings, resolveSpecPaths, sourcesMatch, findSettingsPackageIndices } from "./resolve.ts";
+import { isModuleLazyInSettings, resolveSpecPaths, sourcesMatch, findSettingsPackageIndices, discoverSpecsFromSettings } from "./resolve.ts";
 import { performance } from "node:perf_hooks";
-import type { LazyConfig, LoadResult, ResolvedEntry } from "./types.ts";
+import type { LazyConfig, LazySpec, LoadResult, ResolvedEntry } from "./types.ts";
 import { copyFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { getSettingsPath } from "./config.ts";
@@ -140,6 +140,62 @@ function formatStatus(rt: Runtime): string {
 	if (errors) parts.push(`${errors}✗`);
 	if (rt.restartRequired) parts.push("restart required");
 	return parts.join(" ");
+}
+
+function scanIntoConfig(pi: ExtensionAPI, rt: Runtime, ctx: ExtensionContext, agentDir: string): string[] {
+	const currentPath = getLazyConfigPath(agentDir);
+	const hadExisting = existsSync(currentPath);
+	const existingConfig = hadExisting ? loadConfig(agentDir) : defaultConfig();
+	const before = existingConfig.specs.length;
+
+	const settingsPath = getSettingsPath(agentDir);
+	let packages: unknown[] = [];
+	let settingsWarning = "";
+	if (existsSync(settingsPath)) {
+		try {
+			const parsed = JSON.parse(readFileSync(settingsPath, "utf-8")) as unknown;
+			packages =
+				parsed && typeof parsed === "object" && Array.isArray((parsed as { packages?: unknown }).packages)
+					? ((parsed as { packages: unknown[] }).packages as unknown[])
+					: [];
+		} catch (err) {
+			settingsWarning = `settings.json could not be read: ${err instanceof Error ? err.message : String(err)}`;
+		}
+	} else {
+		settingsWarning = "settings.json not found — no packages could be scanned.";
+	}
+
+	const discovered = discoverSpecsFromSettings(packages, existingConfig.specs);
+	const next: LazyConfig = { ...existingConfig, specs: [...existingConfig.specs, ...discovered] };
+
+	let backup = "";
+	if (hadExisting) {
+		const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+		backup = `${currentPath}.bak.init-${stamp}`;
+		copyFileSync(currentPath, backup);
+	}
+
+	const path = saveConfig(next, agentDir);
+	rt.restartRequired = true;
+	rt.config = next;
+	refreshStatus(pi, rt, ctx);
+
+	const lines: string[] = [];
+	if (!hadExisting) {
+		lines.push(`no lazy.json found — created ${path} with default specs (${before}).`);
+	} else {
+		lines.push(`kept ${before} existing spec${before === 1 ? "" : "s"} → ${path}${backup ? `\nbackup: ${backup}` : ""}`);
+	}
+
+	if (discovered.length === 0) {
+		lines.push("no new packages to add — config already covers settings.json.");
+	} else {
+		lines.push(`added ${discovered.length} discovered package${discovered.length === 1 ? "" : "s"}:`);
+		for (const spec of discovered) lines.push(`  + ${spec.name}`);
+		lines.push("tune priority / cmd / lazy mode by hand — defaults are lazy:true.");
+	}
+	if (settingsWarning) lines.push(settingsWarning);
+	return lines;
 }
 
 function refreshStatus(pi: ExtensionAPI, rt: Runtime, ctx?: ExtensionContext) {
@@ -856,9 +912,9 @@ export function createPiLazy(pi: ExtensionAPI, agentDir = getAgentDir()) {
 	});
 
 	pi.registerCommand("lazy", {
-		description: "LazyVim-style extension manager (list|load|migrate|auto|init|status|doctor)",
+		description: "LazyVim-style extension manager (list|load|migrate|auto|init|scan|status|doctor)",
 		getArgumentCompletions: (prefix) => {
-			const sub = ["status", "list", "load", "migrate", "auto", "init", "config", "profile", "doctor"];
+			const sub = ["status", "list", "load", "migrate", "auto", "init", "scan", "config", "profile", "doctor"];
 			const names = [...rt.entries.keys()].map((n) => `load ${n}`);
 			const items = [...sub, ...names, "auto on", "auto off"].map((v) => ({ value: v, label: v }));
 			const filtered = items.filter((i) => i.value.startsWith(prefix) || i.value.includes(prefix));
@@ -899,19 +955,49 @@ export function createPiLazy(pi: ExtensionAPI, agentDir = getAgentDir()) {
 				return;
 			}
 
-			if (sub === "init") {
+			if (sub === "scan" || sub === "s") {
 				try {
-					const currentPath = getLazyConfigPath(agentDir);
-					let backup = "";
-					if (existsSync(currentPath)) {
-						const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-						backup = `${currentPath}.bak.init-${stamp}`;
-						copyFileSync(currentPath, backup);
-					}
-					const path = saveConfig(defaultConfig(), agentDir);
+					scanIntoConfig(pi, rt, ctx, agentDir);
+				} catch (err) {
+					ctx.ui.notify(`scan failed: ${err instanceof Error ? err.message : String(err)}`, "error");
+				}
+				return;
+			}
+
+			if (sub === "init") {
+				// init = scan + migrate.
+				//
+				// A spec list on its own does nothing: migrateSettings is what turns
+				// `lazy: true` into `extensions: []` in settings.json, which is the
+				// only thing that actually defers a package's extension factory.
+				// Requiring two commands made a half-done setup the default outcome,
+				// and the failure mode is silent — the config that exists to speed Pi
+				// up leaves packages eager. So init performs both halves.
+				//
+				// Old init overwrote lazy.json with defaultConfig(), dropping every
+				// tuned spec; losing specs made migrate stop managing those packages,
+				// which is how a `/lazy init` could make startup slower.
+				try {
+					const scanLines = scanIntoConfig(pi, rt, ctx, agentDir);
+					const result = migrateSettings(agentDir);
 					rt.restartRequired = true;
-					refreshStatus(pi, rt, ctx);
-					ctx.ui.notify(`wrote default config → ${path}${backup ? `\nbackup: ${backup}` : ""}\nReload or restart Pi to apply it.`, "info");
+
+					const lines: string[] = [...scanLines, "", "── migrate ──"];
+					if (!result.ok) {
+						lines.push(`migrate failed: ${result.error}`);
+					} else {
+						lines.push(`settings → ${result.settingsPath}`);
+						if (result.changed.length > 0) {
+							lines.push(`made lazy (${result.changed.length}): ${result.changed.join(", ")}`);
+						} else {
+							lines.push("nothing to change in settings.json — already in sync.");
+						}
+						if (result.skipped.length > 0) {
+							lines.push(`skipped (${result.skipped.length}): ${result.skipped.join(", ")}`);
+						}
+						lines.push("Reload or restart Pi to apply it.");
+					}
+					ctx.ui.notify(lines.join("\n"), result.ok ? "info" : "warning");
 				} catch (err) {
 					ctx.ui.notify(`failed to initialize config: ${err instanceof Error ? err.message : String(err)}`, "error");
 				}
@@ -987,7 +1073,7 @@ export function createPiLazy(pi: ExtensionAPI, agentDir = getAgentDir()) {
 				return;
 			}
 
-			ctx.ui.notify("usage: /lazy [status|list|profile|load <name>|migrate|auto on|off|init|config]", "warning");
+			ctx.ui.notify("usage: /lazy [status|list|profile|load <name>|init|scan|migrate|auto on|off|config]", "warning");
 		},
 	});
 

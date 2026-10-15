@@ -10,3 +10,7 @@ node_modules/
 .test-build-*
 *.tgz
 .bak-src/
+
+# local backups
+dist/*.bak*
+dist/*.dbg-bak

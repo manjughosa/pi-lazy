@@ -196,6 +196,67 @@ export function findSettingsPackageIndex(settingsPackages: unknown[], source: st
 	return findSettingsPackageIndices(settingsPackages, source)[0] ?? -1;
 }
 
+/**
+ * Specs for every package pi is configured to load that no existing spec covers.
+ *
+ * Scope is deliberately limited to `settings.json`'s `packages` array — the
+ * authoritative list of what pi actually loads. Packages merely present in
+ * node_modules are NOT returned: lazy never activates a package pi has not
+ * registered, so a spec for one would be inert and would confuse `/lazy status`.
+ * This mirrors migrate's Guard 1 (never fabricate settings entries).
+ *
+ * A package is skipped when it cannot be given a meaningful default: a bare
+ * `"extensions": ["+..."]` entry is an explicit opt-in to one entrypoint, and
+ * inferring lazy's own `cmd`/`keywords` for an unknown extension would be guesswork.
+ * Those keep their current behaviour until the operator writes a spec by hand.
+ */
+export function discoverSpecsFromSettings(settingsPackages: unknown[], existing: LazySpec[]): LazySpec[] {
+	const covered = new Set(existing.map((spec) => normalizeSourceKey(spec.source)));
+	const discovered: LazySpec[] = [];
+	const seen = new Set<string>();
+
+	settingsPackages.forEach((entry) => {
+		let source: string;
+		let extensionFilter: unknown;
+
+		if (typeof entry === "string") {
+			source = entry;
+		} else if (entry && typeof entry === "object" && typeof (entry as { source?: string }).source === "string") {
+			source = (entry as { source: string }).source;
+			extensionFilter = (entry as { extensions?: unknown }).extensions;
+		} else {
+			return;
+		}
+
+		const key = normalizeSourceKey(source);
+		if (covered.has(key) || seen.has(key)) return;
+		seen.add(key);
+
+		// Entries that select specific entrypoints are left to the operator.
+		if (Array.isArray(extensionFilter) && extensionFilter.length > 0) return;
+
+		discovered.push({
+			name: specNameFromSource(source),
+			source,
+			lazy: true,
+			keywords: [specNameFromSource(source)],
+			description: "auto-discovered from settings.json — tune priority/cmd by hand",
+		});
+	});
+
+	return discovered;
+}
+
+/** Derive a readable spec name from a package source (npm:pkg, path, git URL). */
+function specNameFromSource(source: string): string {
+	const bare = source.startsWith("npm:") ? source.slice(4) : source;
+	const name = npmPackageName(source);
+	if (name) return name;
+	const normalized = bare.replace(/\\/g, "/").replace(/\/+$/, "");
+	const segments = normalized.split("/").filter(Boolean);
+	return segments[segments.length - 1] ?? bare;
+}
+
 export function findSettingsPackageIndices(settingsPackages: unknown[], source: string): number[] {
 	const indices: number[] = [];
 	settingsPackages.forEach((entry, index) => {
