@@ -446,6 +446,68 @@ function snapshotList(agentDir: string): Array<{ name: string; specCount: number
 	}
 }
 
+/**
+ * Propagate the live loading scheme into every saved snapshot.
+ *
+ * A snapshot replaces `settings.packages` wholesale, so a package added after the
+ * snapshot was taken is simply absent from it. Restoring that snapshot then
+ * deregisters the package: it stops loading, with no error anywhere. `/lazy init`
+ * is where packages appear, so it is where this is repaired.
+ *
+ * Additive only. Existing entries keep their own filter form — that form is the
+ * whole reason the snapshot exists. Runs after migrate, so the package lands in
+ * the same resolved shape it has live.
+ */
+function mergeLiveIntoSnapshots(agentDir: string): { updated: string[]; added: number; error?: string } {
+	const dir = snapshotDir(agentDir);
+	if (!existsSync(dir)) return { updated: [], added: 0 };
+
+	const liveSpecs = loadConfig(agentDir).specs;
+	let livePackages: unknown[] = [];
+	try {
+		const parsed = JSON.parse(readFileSync(getSettingsPath(agentDir), "utf-8")) as { packages?: unknown };
+		if (Array.isArray(parsed?.packages)) livePackages = parsed.packages;
+	} catch (err) {
+		return { updated: [], added: 0, error: `settings.json unreadable, snapshots left alone: ${err instanceof Error ? err.message : String(err)}` };
+	}
+
+	const sourceOf = (e: unknown): string | null => {
+		const s = typeof e === "string" ? e : (e as { source?: unknown })?.source;
+		return typeof s === "string" ? s : null;
+	};
+
+	const updated: string[] = [];
+	let added = 0;
+	for (const file of readdirSync(dir).filter((f) => f.endsWith(".json") && !f.includes(".bak-"))) {
+		const path = join(dir, file);
+		let snap: { config?: LazyConfig; settings?: { packages?: unknown[] } };
+		try {
+			snap = JSON.parse(readFileSync(path, "utf-8")) as typeof snap;
+		} catch {
+			continue;
+		}
+		if (!snap.config || !Array.isArray(snap.config.specs)) continue;
+		if (!Array.isArray(snap.settings?.packages)) continue;
+
+		const savedSpecs = snap.config.specs;
+		const savedPackages = snap.settings.packages;
+		const missingSpecs = liveSpecs.filter((s) => !savedSpecs.some((k) => k.name === s.name || sourcesMatch(k.source, s.source)));
+		const knownSources = savedPackages.map(sourceOf).filter((s): s is string => s !== null);
+		const missingPackages = livePackages.filter((e) => {
+			const s = sourceOf(e);
+			return s !== null && !knownSources.some((k) => sourcesMatch(k, s));
+		});
+		if (missingSpecs.length === 0 && missingPackages.length === 0) continue;
+
+		snap.config.specs = [...savedSpecs, ...missingSpecs];
+		snap.settings.packages = [...savedPackages, ...missingPackages];
+		atomicWriteJson(path, snap);
+		updated.push(`${file.replace(/\.json$/, "")} (+${missingSpecs.length} spec, +${missingPackages.length} pkg)`);
+		added += missingSpecs.length + missingPackages.length;
+	}
+	return { updated, added };
+}
+
 interface EnableResult {
 	ok: boolean;
 	restoredSpec?: boolean;
@@ -1681,9 +1743,9 @@ export function createPiLazy(pi: ExtensionAPI, agentDir = getAgentDir()) {
 	});
 
 	pi.registerCommand("lazy", {
-		description: "LazyVim-style extension manager (list|load|disable|enable|rescue|snapshot|restore|migrate|auto|init|scan|status|doctor)",
+		description: "LazyVim-style extension manager (list|load|disable|enable|rescue|snapshot|restore|delete|migrate|auto|init|scan|status|doctor)",
 		getArgumentCompletions: (prefix) => {
-			const sub = ["status", "list", "load", "migrate", "auto", "init", "scan", "disable", "enable", "rescue", "restore", "snapshot", "config", "profile", "doctor"];
+			const sub = ["status", "list", "load", "migrate", "auto", "init", "scan", "disable", "enable", "rescue", "restore", "snapshot", "delete", "config", "profile", "doctor"];
 			const items = [...sub, "auto on", "auto off"];
 
 			// `/lazy load <name>` — the runtime catalog. `load` needs a name the loader
@@ -1699,9 +1761,9 @@ export function createPiLazy(pi: ExtensionAPI, agentDir = getAgentDir()) {
 				items.push(`enable ${e.name}`, `disable ${e.name}`);
 			}
 
-			// `/lazy restore <name>` — a snapshot name, not a package name.
+			// `/lazy restore|delete <name>` — a snapshot name, not a package name.
 			for (const s of snapshotList(agentDir)) {
-				items.push(`restore ${s.name}`, `snapshot delete ${s.name}`);
+				items.push(`restore ${s.name}`, `delete ${s.name}`);
 			}
 
 			const mapped = items.map((v) => ({ value: v, label: v }));
@@ -1787,6 +1849,18 @@ export function createPiLazy(pi: ExtensionAPI, agentDir = getAgentDir()) {
 						lines.push("Reload or restart Pi to apply it.");
 					}
 					lines.push("", `── roster ──`, `${roster.all.length} packages recorded for /lazy disable and /lazy enable → ${rosterPath(agentDir)}`);
+
+					// A snapshot replaces settings.packages wholesale, so a package added
+					// today is missing from every snapshot taken yesterday — and restoring
+					// one silently deregisters it. Fold the new packages in while we are
+					// here, since this is the command that discovered them.
+					const synced = mergeLiveIntoSnapshots(agentDir);
+					if (synced.error) {
+						lines.push("", "── snapshots ──", synced.error);
+					} else if (synced.updated.length > 0) {
+						lines.push("", `── snapshots ──`, `updated ${synced.updated.length}: ${synced.updated.join(", ")}`);
+					}
+
 					ctx.ui.notify(lines.join("\n"), result.ok ? "info" : "warning");
 				} catch (err) {
 					ctx.ui.notify(`failed to initialize config: ${err instanceof Error ? err.message : String(err)}`, "error");
@@ -1835,22 +1909,32 @@ export function createPiLazy(pi: ExtensionAPI, agentDir = getAgentDir()) {
 			}
 
 
-			if (sub === "snapshot" || sub === "snap") {
-				const snapshotName = rest.join(" ").trim();
-				if (snapshotName.toLowerCase() === "delete") {
-					const target = rest.slice(1).join(" ").trim();
-					if (!target) {
-						ctx.ui.notify("usage: /lazy snapshot delete <name>", "warning");
-						return;
-					}
-					const deleted = snapshotDelete(agentDir, target);
-					if (!deleted.ok) {
-						ctx.ui.notify(`snapshot delete failed: ${deleted.error}`, "error");
-						return;
-					}
-					ctx.ui.notify(`deleted snapshot "${target}"`, "info");
+			if (sub === "delete") {
+				const target = rest.join(" ").trim();
+				if (!target) {
+					// Bare `delete` lists what can be deleted. `delete` is destructive and
+					// its argument is a snapshot name, not a package name, so showing the
+					// candidates is the only way to use it without memorising the directory.
+					const listed = snapshotList(agentDir);
+					ctx.ui.notify(
+						listed.length === 0
+							? `no snapshots saved — nothing to delete\n(storage: ${snapshotDir(agentDir)})`
+							: ["saved snapshots:", ...listed.map((s) => `  ${s.name}  (${s.specCount} specs, ${s.packageCount} packages, ${s.savedAt})`), "", "usage: /lazy delete <name>"].join("\n"),
+						"info",
+					);
 					return;
 				}
+				const deleted = snapshotDelete(agentDir, target);
+				if (!deleted.ok) {
+					ctx.ui.notify(`delete failed: ${deleted.error}`, "error");
+					return;
+				}
+				ctx.ui.notify(`deleted snapshot "${target}"`, "info");
+				return;
+			}
+
+			if (sub === "snapshot" || sub === "snap") {
+				const snapshotName = rest.join(" ").trim();
 				if (!snapshotName) {
 					// Bare `/lazy snapshot` lists what is saved — the only sensible
 					// reading now that save/restore are flat subcommands.
@@ -2026,7 +2110,7 @@ export function createPiLazy(pi: ExtensionAPI, agentDir = getAgentDir()) {
 				return;
 			}
 
-			ctx.ui.notify("usage: /lazy [status|list|profile|load <name>|disable <name>|enable <name>|rescue|snapshot <name>|restore <name>|init|scan|migrate|auto on|off|config]", "warning");
+			ctx.ui.notify("usage: /lazy [status|list|profile|load <name>|disable <name>|enable <name>|rescue|snapshot <name>|restore <name>|delete <name>|init|scan|migrate|auto on|off|config]", "warning");
 		},
 	});
 

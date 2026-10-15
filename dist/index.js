@@ -1389,6 +1389,50 @@ function snapshotList(agentDir) {
     return [];
   }
 }
+function mergeLiveIntoSnapshots(agentDir) {
+  const dir = snapshotDir(agentDir);
+  if (!existsSync5(dir)) return { updated: [], added: 0 };
+  const liveSpecs = loadConfig(agentDir).specs;
+  let livePackages = [];
+  try {
+    const parsed = JSON.parse(readFileSync5(getSettingsPath(agentDir), "utf-8"));
+    if (Array.isArray(parsed?.packages)) livePackages = parsed.packages;
+  } catch (err) {
+    return { updated: [], added: 0, error: `settings.json unreadable, snapshots left alone: ${err instanceof Error ? err.message : String(err)}` };
+  }
+  const sourceOf = (e) => {
+    const s = typeof e === "string" ? e : e?.source;
+    return typeof s === "string" ? s : null;
+  };
+  const updated = [];
+  let added = 0;
+  for (const file of readdirSync2(dir).filter((f) => f.endsWith(".json") && !f.includes(".bak-"))) {
+    const path = join4(dir, file);
+    let snap;
+    try {
+      snap = JSON.parse(readFileSync5(path, "utf-8"));
+    } catch {
+      continue;
+    }
+    if (!snap.config || !Array.isArray(snap.config.specs)) continue;
+    if (!Array.isArray(snap.settings?.packages)) continue;
+    const savedSpecs = snap.config.specs;
+    const savedPackages = snap.settings.packages;
+    const missingSpecs = liveSpecs.filter((s) => !savedSpecs.some((k) => k.name === s.name || sourcesMatch(k.source, s.source)));
+    const knownSources = savedPackages.map(sourceOf).filter((s) => s !== null);
+    const missingPackages = livePackages.filter((e) => {
+      const s = sourceOf(e);
+      return s !== null && !knownSources.some((k) => sourcesMatch(k, s));
+    });
+    if (missingSpecs.length === 0 && missingPackages.length === 0) continue;
+    snap.config.specs = [...savedSpecs, ...missingSpecs];
+    snap.settings.packages = [...savedPackages, ...missingPackages];
+    atomicWriteJson(path, snap);
+    updated.push(`${file.replace(/\.json$/, "")} (+${missingSpecs.length} spec, +${missingPackages.length} pkg)`);
+    added += missingSpecs.length + missingPackages.length;
+  }
+  return { updated, added };
+}
 function rescueNative(agentDir) {
   const configPath = getLazyConfigPath(agentDir);
   const settingsPath = getSettingsPath(agentDir);
@@ -2315,9 +2359,9 @@ function createPiLazy(pi, agentDir = getAgentDir4()) {
     drainResumeWaiters(rt);
   });
   pi.registerCommand("lazy", {
-    description: "LazyVim-style extension manager (list|load|disable|enable|rescue|snapshot|restore|migrate|auto|init|scan|status|doctor)",
+    description: "LazyVim-style extension manager (list|load|disable|enable|rescue|snapshot|restore|delete|migrate|auto|init|scan|status|doctor)",
     getArgumentCompletions: (prefix) => {
-      const sub = ["status", "list", "load", "migrate", "auto", "init", "scan", "disable", "enable", "rescue", "restore", "snapshot", "config", "profile", "doctor"];
+      const sub = ["status", "list", "load", "migrate", "auto", "init", "scan", "disable", "enable", "rescue", "restore", "snapshot", "delete", "config", "profile", "doctor"];
       const items = [...sub, "auto on", "auto off"];
       for (const n of rt.entries.keys()) items.push(`load ${n}`);
       const roster = loadRoster(agentDir);
@@ -2325,7 +2369,7 @@ function createPiLazy(pi, agentDir = getAgentDir4()) {
         items.push(`enable ${e.name}`, `disable ${e.name}`);
       }
       for (const s of snapshotList(agentDir)) {
-        items.push(`restore ${s.name}`, `snapshot delete ${s.name}`);
+        items.push(`restore ${s.name}`, `delete ${s.name}`);
       }
       const mapped = items.map((v) => ({ value: v, label: v }));
       const filtered = mapped.filter((i) => i.value.startsWith(prefix) || i.value.includes(prefix));
@@ -2389,6 +2433,12 @@ function createPiLazy(pi, agentDir = getAgentDir4()) {
             lines.push("Reload or restart Pi to apply it.");
           }
           lines.push("", `\u2500\u2500 roster \u2500\u2500`, `${roster.all.length} packages recorded for /lazy disable and /lazy enable \u2192 ${rosterPath(agentDir)}`);
+          const synced = mergeLiveIntoSnapshots(agentDir);
+          if (synced.error) {
+            lines.push("", "\u2500\u2500 snapshots \u2500\u2500", synced.error);
+          } else if (synced.updated.length > 0) {
+            lines.push("", `\u2500\u2500 snapshots \u2500\u2500`, `updated ${synced.updated.length}: ${synced.updated.join(", ")}`);
+          }
           ctx.ui.notify(lines.join("\n"), result.ok ? "info" : "warning");
         } catch (err) {
           ctx.ui.notify(`failed to initialize config: ${err instanceof Error ? err.message : String(err)}`, "error");
@@ -2432,22 +2482,27 @@ function createPiLazy(pi, agentDir = getAgentDir4()) {
         refreshStatus(pi, rt, ctx);
         return;
       }
-      if (sub === "snapshot" || sub === "snap") {
-        const snapshotName = rest.join(" ").trim();
-        if (snapshotName.toLowerCase() === "delete") {
-          const target = rest.slice(1).join(" ").trim();
-          if (!target) {
-            ctx.ui.notify("usage: /lazy snapshot delete <name>", "warning");
-            return;
-          }
-          const deleted = snapshotDelete(agentDir, target);
-          if (!deleted.ok) {
-            ctx.ui.notify(`snapshot delete failed: ${deleted.error}`, "error");
-            return;
-          }
-          ctx.ui.notify(`deleted snapshot "${target}"`, "info");
+      if (sub === "delete") {
+        const target = rest.join(" ").trim();
+        if (!target) {
+          const listed = snapshotList(agentDir);
+          ctx.ui.notify(
+            listed.length === 0 ? `no snapshots saved \u2014 nothing to delete
+(storage: ${snapshotDir(agentDir)})` : ["saved snapshots:", ...listed.map((s) => `  ${s.name}  (${s.specCount} specs, ${s.packageCount} packages, ${s.savedAt})`), "", "usage: /lazy delete <name>"].join("\n"),
+            "info"
+          );
           return;
         }
+        const deleted = snapshotDelete(agentDir, target);
+        if (!deleted.ok) {
+          ctx.ui.notify(`delete failed: ${deleted.error}`, "error");
+          return;
+        }
+        ctx.ui.notify(`deleted snapshot "${target}"`, "info");
+        return;
+      }
+      if (sub === "snapshot" || sub === "snap") {
+        const snapshotName = rest.join(" ").trim();
         if (!snapshotName) {
           const listed = snapshotList(agentDir);
           ctx.ui.notify(
@@ -2606,7 +2661,7 @@ function createPiLazy(pi, agentDir = getAgentDir4()) {
         );
         return;
       }
-      ctx.ui.notify("usage: /lazy [status|list|profile|load <name>|disable <name>|enable <name>|rescue|snapshot <name>|restore <name>|init|scan|migrate|auto on|off|config]", "warning");
+      ctx.ui.notify("usage: /lazy [status|list|profile|load <name>|disable <name>|enable <name>|rescue|snapshot <name>|restore <name>|delete <name>|init|scan|migrate|auto on|off|config]", "warning");
     }
   });
   pi.registerTool({

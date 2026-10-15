@@ -24,6 +24,13 @@ How to read this file:
   and the filter is what actually defers the factory. Folders without a usable manifest are skipped
   rather than guessed at — a bare directory contributes nothing, and a spec for it would produce an
   entry that fails to load forever.
+- **`/lazy init` folds newly discovered packages into every saved snapshot.** A snapshot replaces
+  `settings.packages` wholesale, so a package installed after the snapshot was taken is simply
+  absent from it — and restoring that snapshot deregisters the package, which stops loading with no
+  error anywhere. `init` is the command that discovers packages, so it is where this is repaired:
+  after the catalog merge and migrate, each snapshot gains whatever spec or package entry it is
+  missing. Additive only — nothing is ever removed, and existing entries keep their own `extensions`
+  filter form, since that form is the reason the snapshot exists.
 - **`/lazy snapshot <name>`** — save the whole loading scheme under a name. A snapshot captures the
   catalog, its global switches, **and** the `settings.json` package list with each entry's
   `extensions` filter form intact. Catalog-only saving was tried first and is not sufficient:
@@ -32,7 +39,7 @@ How to read this file:
   spec edit can reproduce. Snapshots live in `<agent-dir>/lazy-snapshots/<name>.json`; overwriting
   one keeps the previous copy as `.bak-<stamp>`.
 - **`/lazy snapshot`** (no argument) lists saved snapshots with spec/package counts and saved-at
-  time; **`/lazy snapshot delete <name>`** removes one.
+  time; **`/lazy delete <name>`** removes one.
 - **`/lazy restore <name>`** — switch to a saved snapshot. This is a **replacement, not a merge**:
   restoring a scheme built on `5,6,7,8` over one built on `1,2,3,4` ends with exactly `5,6,7,8`.
   Implemented as three ordered steps — write `settings.packages`, write `lazy.json`, then run
@@ -62,10 +69,16 @@ How to read this file:
   mode, used by the bare `/lazy enable` and `/lazy disable` listings and by tab completion after those
   subcommands, so the names offered while typing are the names the commands accept.
 - Tab completion now offers package names after `enable` / `disable` and snapshot names after
-  `restore` / `snapshot delete`, not just after `load`.
+  `restore` / `delete`, not just after `load`.
 
 ### Changed
 
+- **Deleting a snapshot is a top-level verb: `/lazy delete <name>`, not `/lazy snapshot delete
+  <name>`.** The nested form never worked. It compared the *whole* argument string against the word
+  `delete`, so the check only matched when no snapshot name followed — exactly the case where there
+  was nothing to delete. `/lazy snapshot delete test` therefore fell through to the save path and
+  created a snapshot named `delete test` instead of removing one. Bare `/lazy delete` lists the saved
+  snapshots, since the argument is a snapshot name and not a package name.
 - **Discovery no longer defaults to `lazy: true`; new specs are added eager (`lazy: false`).**
   `init` discovers what is installed, it does not decide when anything loads. Defaulting to deferred
   meant a single `/lazy init` could silently re-time a whole stack — and if one of the newly deferred

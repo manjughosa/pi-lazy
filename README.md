@@ -152,6 +152,9 @@ catalog is actually applied in the same step.
 
 To only merge, without touching `settings.json`, use `/lazy scan`.
 
+`init` also folds anything it newly discovered into **every saved snapshot** — see
+[Snapshots and new packages](#snapshots-and-new-packages).
+
 Newly discovered packages are added as `lazy: false` (**eager**) with a `keywords` entry derived from
 the package name, and local extensions under `extensions/` are registered the same way. Discovery
 records what is installed; it does not decide when anything loads. Set `lazy: true` or `after-start`
@@ -474,7 +477,7 @@ So declare the commands and tools you actually want to trigger a load:
 | `/lazy migrate` | Apply `extensions: []` filters + backup `settings.json` |
 | `/lazy auto` | Show whether keyword/event auto-load is on |
 | `/lazy auto on\|off` | Toggle auto-load and persist to `lazy.json` |
-| `/lazy init` | Scan `settings.json` for packages the catalog misses, add them, then run `/lazy migrate` |
+| `/lazy init` | Scan `settings.json` for packages the catalog misses, add them, then run `/lazy migrate` and fold the new packages into every saved snapshot |
 | `/lazy scan` (alias `s`) | Same catalog merge as `init`, **without** the migrate step |
 | `/lazy disable <name>` | Remove a package from the loading scheme (catalog spec + settings entry), then migrate. Leaves `node_modules` alone |
 | `/lazy enable <name>` | Restore a package disabled earlier (spec + settings entry from the newest `*.bak.disable-*` snapshot), then migrate |
@@ -482,13 +485,13 @@ So declare the commands and tools you actually want to trigger a load:
 | `/lazy rescue` | Hand every package back to native Pi: clear `extensions` filters and empty the catalog |
 | `/lazy snapshot <name>` | Save the whole loading scheme under a name |
 | `/lazy snapshot` | List saved snapshots (name, spec/package counts, saved-at) |
-| `/lazy snapshot delete <name>` | Delete one saved snapshot |
+| `/lazy delete <name>` | Delete one saved snapshot (bare `/lazy delete` lists what can be deleted) |
 | `/lazy restore <name>` | **Replace** the current scheme with a saved snapshot, then migrate |
 | `/lazy doctor` | Diagnose catalog vs settings vs runtime inconsistencies (invalid lazy values, duplicates, un-migrated entries, poisoned loads) |
 | `/lazy config` | Print the absolute path to `lazy.json` |
 | `/lazy profile` | Show in-session catalog, resolution, and load timings |
 
-Tab completion is available for subcommands and `load <name>`.
+Tab completion is available for subcommands, `load <name>`, and snapshot names after `restore` / `delete`.
 
 ### Statusline
 
@@ -620,6 +623,27 @@ catalog-only implementation produced `1,2,3,4,5,6,7,8` instead of `5,6,7,8`.
 Packages a snapshot does not mention are **reported, never deleted from disk**. Bring any of them
 back with `pi install npm:<name>`. Both files are backed up (`*.bak.restore-<stamp>`) before the
 first write.
+
+### Snapshots and new packages
+
+Because `restore` replaces `settings.packages` wholesale, a package installed *after* a snapshot was
+taken is absent from it — and restoring that snapshot silently deregisters the package. Nothing
+errors; the extension just stops loading.
+
+`/lazy init` closes that hole. After it merges a newly discovered package into the live catalog, it
+folds the same spec and package entry into **every** saved snapshot:
+
+```
+── snapshots ──
+updated 2: work (+1 spec, +1 pkg), minimal (+1 spec, +1 pkg)
+```
+
+The merge is **additive only**: nothing is ever removed from a snapshot, and entries already in it
+keep their own `extensions` filter form — that form is the reason the snapshot exists. It runs after
+`migrate`, so the new package lands in the snapshots in the same resolved shape it has live.
+
+So the sequence is: install the package, run `/lazy init`, and every scheme you switch to from then
+on already knows about it.
 
 ### Drop a package from the scheme
 

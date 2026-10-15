@@ -355,3 +355,41 @@ test("a load that overtakes an in-flight prefetch imports the module only once",
 	assert.equal(result.ok, true);
 	assert.equal((globalThis as any).__piLazyRace, 1);
 });
+
+test("init folds a newly discovered package into every saved snapshot", async () => {
+	const agent = tempDir();
+	const p1 = join(agent, "p1");
+	const p2 = join(agent, "p2");
+	createPackage(p1, { "index.mjs": "export default function(){}" });
+	createPackage(p2, { "index.mjs": "export default function(){}" });
+
+	writeJson(join(agent, "lazy.json"), { version: 1, specs: [{ name: "p1", source: p1, lazy: false }] });
+	writeJson(join(agent, "settings.json"), { packages: [p1] });
+
+	const pi = mockPi();
+	createPiLazy(pi.api, agent);
+	const lazy = pi.commands.get("lazy");
+
+	// Two schemes saved while p1 was the only package.
+	await lazy.handler("snapshot base", pi.ctx);
+	await lazy.handler("snapshot alt", pi.ctx);
+
+	// p2 arrives the way `pi install` leaves it: registered, unknown to the catalog.
+	writeJson(join(agent, "settings.json"), { packages: [p1, p2] });
+	await lazy.handler("init", pi.ctx);
+
+	const sourceOf = (e: unknown) => (typeof e === "string" ? e : (e as { source: string }).source);
+	for (const name of ["base", "alt"]) {
+		const snap = JSON.parse(readFileSync(join(agent, "lazy-snapshots", `${name}.json`), "utf8"));
+		assert.ok(
+			snap.config.specs.some((s: LazySpec) => s.name === "p2"),
+			`snapshot "${name}" should carry the p2 spec`,
+		);
+		assert.ok(
+			snap.settings.packages.some((e: unknown) => sourceOf(e) === p2),
+			`snapshot "${name}" should carry the p2 package entry`,
+		);
+		// p1 was saved by the snapshot itself and must survive untouched.
+		assert.ok(snap.config.specs.some((s: LazySpec) => s.name === "p1"));
+	}
+});
