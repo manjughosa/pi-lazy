@@ -73,6 +73,18 @@ How to read this file:
 
 ### Changed
 
+- **`migrate` now defers all four resource types, not just `extensions`.** A Pi package can declare
+  `extensions`, `skills`, `prompts` and `themes`, and settings filters each one independently — but
+  Pi reads an *absent* key as "load everything the package declares". Writing only `extensions: []`
+  therefore deferred a package's code while leaving its skills in the system prompt and its theme
+  overriding yours, which is what made `/lazy disable` look like it had done nothing on a package
+  that ships skills. Entries now carry `extensions: []`, `skills: []`, `prompts: []`, `themes: []`.
+  Existing entries are upgraded on the next migrate; the eager-restore path strips all four, and
+  still gates on `extensions: []` being present so it never deletes filters the operator authored.
+  Guard 2 now yields if *any* of the four keys carries a `-`/`!` exclusion, instead of only looking
+  at `extensions`.
+  Known gap: a package whose extension calls `resources_discover` to add its own resource paths
+  re-registers them whenever it loads, and no settings filter narrows that. Superpowers does this.
 - **Deleting a snapshot is a top-level verb: `/lazy delete <name>`, not `/lazy snapshot delete
   <name>`.** The nested form never worked. It compared the *whole* argument string against the word
   `delete`, so the check only matched when no snapshot name followed — exactly the case where there

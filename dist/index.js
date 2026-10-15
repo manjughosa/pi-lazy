@@ -997,6 +997,16 @@ function packageSource(spec) {
   }
   return `npm:${spec.source}`;
 }
+var RESOURCE_KEYS = ["extensions", "skills", "prompts", "themes"];
+function isFullyDeferred(entry) {
+  return RESOURCE_KEYS.every((key) => Array.isArray(entry[key]) && entry[key].length === 0);
+}
+function hasExclusions(entry) {
+  return RESOURCE_KEYS.some((key) => {
+    const value = entry[key];
+    return Array.isArray(value) && value.some((token) => typeof token === "string" && (token.trim().startsWith("-") || token.trim().startsWith("!")));
+  });
+}
 function migrateSettings(agentDir = getAgentDir3()) {
   const settingsPath = getSettingsPath(agentDir);
   const config = loadConfig(agentDir);
@@ -1041,23 +1051,22 @@ function migrateSettings(agentDir = getAgentDir3()) {
     }
     const current = packages[idx];
     if (typeof current === "string") {
-      packages[idx] = { source: current, extensions: [] };
+      packages[idx] = { source: current, extensions: [], skills: [], prompts: [], themes: [] };
       changed.push(spec.name);
       continue;
     }
     if (current && typeof current === "object") {
-      const filters = Array.isArray(current.extensions) ? current.extensions : [];
-      if (filters.length === 0) {
+      const entry = current;
+      if (isFullyDeferred(entry)) {
         skipped.push(spec.name);
         continue;
       }
-      const blocking = filters.some((t) => typeof t === "string" && (t.trim().startsWith("-") || t.trim().startsWith("!")));
-      if (blocking) {
+      if (hasExclusions(entry)) {
         skipped.push(`${spec.name} (yielded: entry has exclusions)`);
         continue;
       }
-      const obj = { ...current };
-      obj.extensions = [];
+      const obj = { ...entry };
+      for (const key of RESOURCE_KEYS) obj[key] = [];
       if (typeof obj.source !== "string") obj.source = source;
       packages[idx] = obj;
       changed.push(spec.name);
@@ -1075,7 +1084,9 @@ function migrateSettings(agentDir = getAgentDir3()) {
       continue;
     }
     const restored = { ...obj };
-    delete restored.extensions;
+    for (const key of RESOURCE_KEYS) {
+      if (Array.isArray(restored[key]) && restored[key].length === 0) delete restored[key];
+    }
     packages[idx] = Object.keys(restored).length === 1 ? restored.source : restored;
     changed.push(`${spec.name} (restored eager)`);
   }

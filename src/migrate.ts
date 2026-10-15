@@ -30,8 +30,43 @@ function packageSource(spec: LazySpec): string {
 }
 
 /**
- * Rewrite settings.packages so managed lazy specs keep the package installed
- * but do not eager-load extension factories (`extensions: []`).
+ * The four resource types a Pi package can declare, and the only ones settings
+ * can filter. All four are written together.
+ *
+ * Deferring a package's extension while leaving its skills, prompts and themes
+ * live is not a deferral, it is half of one — and the leftover half is exactly
+ * what surprises people: the package's tools are gone, but its skills are still
+ * in the system prompt and its theme still overrides yours.
+ *
+ * Pi treats an absent key as "load everything the package declares" and `[]` as
+ * "load none of that type", so writing all four is the only form that means
+ * what `/lazy disable` says.
+ */
+const RESOURCE_KEYS = ["extensions", "skills", "prompts", "themes"] as const;
+
+/** True when every resource key is present and empty — the form migrate writes. */
+function isFullyDeferred(entry: Record<string, unknown>): boolean {
+	return RESOURCE_KEYS.every((key) => Array.isArray(entry[key]) && (entry[key] as unknown[]).length === 0);
+}
+
+/** True when any resource key carries a `-`/`!` exclusion. */
+function hasExclusions(entry: Record<string, unknown>): boolean {
+	return RESOURCE_KEYS.some((key) => {
+		const value = entry[key];
+		return (
+			Array.isArray(value) &&
+			value.some((token) => typeof token === "string" && (token.trim().startsWith("-") || token.trim().startsWith("!")))
+		);
+	});
+}
+
+/**
+ * Rewrite settings.packages so managed lazy specs keep the package installed but
+ * load none of its resources.
+ *
+ * `extensions: []` is what defers the factory; the other three keys keep the
+ * skills, prompts and themes out too. Pi only reads `settings.packages`, so this
+ * file is the single place where a package's load behaviour is decided.
  */
 export function migrateSettings(agentDir = getAgentDir()): MigrateResult {
 	const settingsPath = getSettingsPath(agentDir);
@@ -86,28 +121,27 @@ export function migrateSettings(agentDir = getAgentDir()): MigrateResult {
 
 		const current = packages[idx];
 		if (typeof current === "string") {
-			packages[idx] = { source: current, extensions: [] };
+			packages[idx] = { source: current, extensions: [], skills: [], prompts: [], themes: [] };
 			changed.push(spec.name);
 			continue;
 		}
 
 		if (current && typeof current === "object") {
-			const filters = Array.isArray(current.extensions) ? (current.extensions as unknown[]) : [];
-			if (filters.length === 0) {
+			const entry = current as Record<string, unknown>;
+			if (isFullyDeferred(entry)) {
 				// Already in lazy form — leave untouched (also skips extmgr's
 				// "all disabled" `[]`, which is ambiguous but already inert).
 				skipped.push(spec.name);
 				continue;
 			}
-			const blocking = filters.some((t) => typeof t === "string" && (t.trim().startsWith("-") || t.trim().startsWith("!")));
-			if (blocking) {
+			if (hasExclusions(entry)) {
 				// Guard 2: entry carries exclusion markers → yield to extmgr / pi
 				// config; never overwrite them with [].
 				skipped.push(`${spec.name} (yielded: entry has exclusions)`);
 				continue;
 			}
-			const obj = { ...(current as Record<string, unknown>) };
-			obj.extensions = [];
+			const obj = { ...entry };
+			for (const key of RESOURCE_KEYS) obj[key] = [];
 			if (typeof obj.source !== "string") obj.source = source;
 			packages[idx] = obj;
 			changed.push(spec.name);
@@ -117,7 +151,9 @@ export function migrateSettings(agentDir = getAgentDir()): MigrateResult {
 		skipped.push(spec.name);
 	}
 
-	// Eager specs previously filtered empty → restore string form when safe
+	// Eager specs previously filtered empty → restore string form when safe.
+	// `extensions: []` is the marker migrate itself wrote, so it gates the whole
+	// strip: without that key we would be deleting filters the operator authored.
 	for (const spec of config.specs.filter((s) => s.lazy === false)) {
 		const idx = findSettingsPackageIndex(packages, spec.source);
 		if (idx === -1) continue;
@@ -130,7 +166,9 @@ export function migrateSettings(agentDir = getAgentDir()): MigrateResult {
 		}
 
 		const restored = { ...obj };
-		delete restored.extensions;
+		for (const key of RESOURCE_KEYS) {
+			if (Array.isArray(restored[key]) && (restored[key] as unknown[]).length === 0) delete restored[key];
+		}
 		packages[idx] = Object.keys(restored).length === 1 ? restored.source : restored;
 		changed.push(`${spec.name} (restored eager)`);
 	}

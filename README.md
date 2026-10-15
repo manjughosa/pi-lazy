@@ -474,7 +474,7 @@ So declare the commands and tools you actually want to trigger a load:
 | `/lazy` or `/lazy status` | Status summary + full table (state, mode, source, timings) |
 | `/lazy list` | Compact one-line-per-spec table |
 | `/lazy load <name>` | Force-load a pending package (name, or unique source suffix) |
-| `/lazy migrate` | Apply `extensions: []` filters + backup `settings.json` |
+| `/lazy migrate` | Apply `[]` filters to all four resource types + backup `settings.json` |
 | `/lazy auto` | Show whether keyword/event auto-load is on |
 | `/lazy auto on\|off` | Toggle auto-load and persist to `lazy.json` |
 | `/lazy init` | Scan `settings.json` for packages the catalog misses, add them, then run `/lazy migrate` and fold the new packages into every saved snapshot |
@@ -730,8 +730,13 @@ pi-lazy: run /lazy migrate then restart for true module-lazy
   retried until restart
 - **Boot-critical packages** should stay `"lazy": false`
 - **Stub `cmd` / `tools` names must be declared** in the spec
-- **Skills / prompts** stay eager by default — only **extensions** are deferred via
-  `extensions: []`
+- **All four resource types are deferred together.** `migrate` writes `extensions: []`,
+  `skills: []`, `prompts: []` and `themes: []`. Pi reads an absent key as "load everything the
+  package declares", so filtering only `extensions` would leave the package's skills, prompts and
+  themes live — its tools gone but its skills still in the system prompt.
+- **A package that re-registers its own resources at runtime can still surface them.** If a
+  package's extension calls `resources_discover` to add its skills directory, that runs whenever the
+  extension loads, and no settings filter narrows it. Superpowers does exactly this.
 - **Git-sourced packages** are not fully resolved in v1 unless you point `source` at a local path
 - Without migrate, managed specs remain eager and on-demand load asks you to migrate
 
@@ -761,7 +766,7 @@ Layout:
 | ---- | ---- |
 | `src/index.ts` | Extension entry — commands, stubs, events, `lazy_load`, profiling |
 | `src/config.ts` | `lazy.json` load/save + default catalog |
-| `src/migrate.ts` | `settings.packages` → `extensions: []` |
+| `src/migrate.ts` | `settings.packages` → `[]` filters on extensions / skills / prompts / themes |
 | `src/resolve.ts` | Package root + extension entry resolution |
 | `src/loader.ts` | Dynamic import / cached jiti setup + factory invoke |
 | `dist/index.js` | Compiled production extension entry |

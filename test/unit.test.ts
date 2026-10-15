@@ -128,6 +128,39 @@ test("migration restores eager extensions without losing package metadata", () =
 	assert.ok(result.backupPath);
 });
 
+test("migration defers all four resource types, not just extensions", () => {
+	const agent = tempDir();
+	writeJson(join(agent, "lazy.json"), { version: 1, specs: [{ name: "pkg", source: "npm:pkg", lazy: true }] });
+	writeJson(join(agent, "settings.json"), { packages: ["npm:pkg"] });
+	const result = migrateSettings(agent);
+	assert.equal(result.ok, true);
+	const settings = JSON.parse(readFileSync(join(agent, "settings.json"), "utf8"));
+	// An absent key means "load everything the package declares", so deferring
+	// only `extensions` would leave skills, prompts and themes live.
+	assert.deepEqual(settings.packages[0], { source: "npm:pkg", extensions: [], skills: [], prompts: [], themes: [] });
+});
+
+test("migration upgrades an extensions-only entry to all four keys", () => {
+	const agent = tempDir();
+	writeJson(join(agent, "lazy.json"), { version: 1, specs: [{ name: "pkg", source: "npm:pkg", lazy: true }] });
+	writeJson(join(agent, "settings.json"), { packages: [{ source: "npm:pkg", extensions: [] }] });
+	migrateSettings(agent);
+	const settings = JSON.parse(readFileSync(join(agent, "settings.json"), "utf8"));
+	assert.deepEqual(settings.packages[0], { source: "npm:pkg", extensions: [], skills: [], prompts: [], themes: [] });
+});
+
+test("migration yields when any resource key carries an exclusion", () => {
+	const agent = tempDir();
+	writeJson(join(agent, "lazy.json"), { version: 1, specs: [{ name: "pkg", source: "npm:pkg", lazy: true }] });
+	const entry = { source: "npm:pkg", extensions: [], skills: ["-skills/legacy"] };
+	writeJson(join(agent, "settings.json"), { packages: [entry] });
+	const result = migrateSettings(agent);
+	assert.equal(result.ok, true);
+	const settings = JSON.parse(readFileSync(join(agent, "settings.json"), "utf8"));
+	assert.deepEqual(settings.packages[0], entry);
+	assert.ok(result.skipped.some((s) => /exclusions/.test(s)));
+});
+
 test("migration refuses ambiguous duplicate package entries", () => {
 	const agent = tempDir();
 	writeJson(join(agent, "lazy.json"), { version: 1, specs: [{ name: "pkg", source: "npm:pkg", lazy: true }] });
