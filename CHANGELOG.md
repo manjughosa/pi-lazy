@@ -13,7 +13,35 @@ How to read this file:
 
 ## [Unreleased]
 
-(none yet — the next patch level will be 0.4.1 for any hotfixes.)
+### Added
+
+- **`/lazy scan`** (alias `/lazy s`) — merges packages present in `settings.json` but missing from
+  the catalog into `lazy.json`, without touching `settings.json`. Existing specs are kept verbatim;
+  only genuinely new packages get an entry. Idempotent: running it twice adds nothing.
+- **`/lazy init` now performs the migrate step.** One command leaves the catalog merged *and*
+  applied, instead of leaving a half-done setup whose specs exist but do nothing.
+
+### Changed
+
+- **`/lazy init` is incremental and no longer destructive.** It previously called
+  `saveConfig(defaultConfig())`, replacing the whole file with the built-in catalog. Any spec the
+  user had tuned was silently dropped. Because `/lazy migrate` reads that catalog to decide which
+  `settings.packages` entries become `"extensions": []`, dropping specs silently un-lazy'd those
+  packages — so a `/lazy init` could make Pi *slower* to start, the opposite of what the config is
+  for. `init` now merges instead of replacing, and always writes a timestamped backup when the file
+  already existed.
+- Discovery is scoped to `settings.json`'s `packages` array. Packages merely present in
+  `node_modules` are never given specs: Pi would not load them anyway, so a spec would be inert and
+  would misreport them as managed in `/lazy list`. This mirrors migrate's Guard 1.
+- Packages whose `settings.packages` entry carries explicit `extensions` filters (e.g.
+  `["+index.ts"]` or `["-extensions/goal.ts"]`) are left alone. Those already state an intent, and
+  inferring `cmd`/`keywords` for an unknown extension would be guesswork — this also means disabled
+  packages marked with exclusion filters are never re-enabled by `init`.
+
+### Notes for maintainers
+
+- `dist/index.js` is a bundle of `src/*.ts`. Rebuild with `npm run build` after any `src/` change;
+  editing only `src/` has no effect and raises no error.
 
 ## 0.4.0 — 2026-10-15
 

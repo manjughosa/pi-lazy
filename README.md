@@ -36,8 +36,12 @@ package still just one command or keyword away.
 ### Maintenance policy
 
 - **Patches flow in from local use** — this fork exists because the maintainer (you) uses it
-  daily. Every behavior change that lands in `dist/index.js` is mirrored back to `src/` and
-  shows up in `CHANGELOG.md` under the next minor version.
+  daily. Every behavior change is made in `src/` and rebuilt with `npm run build`; the resulting
+  `dist/index.js` is committed, and shows up in `CHANGELOG.md` under the next minor version.
+- **One working tree** — the live extension *is* this repository
+  (`E:/pi-agent/agent/extensions/pi-lazy`). `src/`, `dist/`, and the git history live side by side,
+  so a change and its commit are never two steps apart. This repo previously had to be kept in sync
+  with a separate `pi-lazy-fork/` copy; that duplicate is gone.
 - **Backports from upstream** — if the original `@rahularya01/pi-lazy` repo gets a new commit,
   it's cherry-picked into the next `0.4.x` patch release.
 - **Releases are tagged** — every release is a signed `vX.Y.Z` git tag on `main`; install via
@@ -132,16 +136,30 @@ Restart Pi or run `/reload`.
 On first run, pi-lazy writes a default catalog to `~/.pi/agent/lazy.json`.
 
 Edit that file to match **your** installed packages — see [Configuration](#configuration) below.
-You can also rewrite it back to the defaults anytime with:
+
+To have the catalog pick up packages automatically, run:
 
 ```text
 /lazy init
 ```
 
+`init` **merges**: every spec already in `lazy.json` is kept exactly as written, and only packages
+listed in `settings.json` that the catalog does not yet cover gain a new entry. It never replaces
+your file with the built-in defaults. `init` then runs `/lazy migrate` for you, so the merged
+catalog is actually applied in the same step.
+
+To only merge, without touching `settings.json`, use `/lazy scan`.
+
+Newly discovered packages are added as `lazy: true` with a `keywords` entry derived from the package
+name. Tune `priority`, `cmd`, or `lazy` by hand afterwards.
+
 Only list packages you actually have installed — specs for missing packages will show up as
 errors when you try to load them.
 
 ### 3. Migrate your settings
+
+If you ran `/lazy init` in step 2, this is already done — `init` performs the merge **and** this
+step. Run `/lazy migrate` on its own only when you changed `lazy.json` by hand.
 
 ```text
 /lazy migrate
@@ -269,7 +287,7 @@ requests for the same package share a single load.
 Everything lives in one file: **`~/.pi/agent/lazy.json`**
 
 - Auto-created on first run from built-in defaults
-- Reset with `/lazy init` (backs up the old file, then requires a reload/restart)
+- Merge new packages from `settings.json` with `/lazy init` (or `/lazy scan` for the catalog only) — existing specs are never overwritten
 - Show its path anytime with `/lazy config`
 
 Here's a full example (also in [`examples/lazy.json`](./examples/lazy.json)):
@@ -434,7 +452,8 @@ So declare the commands and tools you actually want to trigger a load:
 | `/lazy migrate` | Apply `extensions: []` filters + backup `settings.json` |
 | `/lazy auto` | Show whether keyword/event auto-load is on |
 | `/lazy auto on\|off` | Toggle auto-load and persist to `lazy.json` |
-| `/lazy init` | Overwrite `lazy.json` with the built-in default catalog |
+| `/lazy init` | Scan `settings.json` for packages the catalog misses, add them, then run `/lazy migrate` |
+| `/lazy scan` (alias `s`) | Same catalog merge as `init`, **without** the migrate step |
 | `/lazy doctor` | Diagnose catalog vs settings vs runtime inconsistencies (invalid lazy values, duplicates, un-migrated entries, poisoned loads) |
 | `/lazy config` | Print the absolute path to `lazy.json` |
 | `/lazy profile` | Show in-session catalog, resolution, and load timings |
@@ -533,10 +552,10 @@ Manual `/lazy load` and stub `/cmd` / tools still work. Turn it back on with `/l
 ### Add a new package later
 
 1. `pi install npm:some-package`
-2. Add a spec to `~/.pi/agent/lazy.json`
-3. `/lazy migrate` (picks up the new managed source)
-4. Restart Pi
-5. `/lazy load some-name` or use its stubs
+2. `/lazy init` — adds the spec for you, then migrates
+   (or add the spec to `~/.pi/agent/lazy.json` by hand and run `/lazy migrate`)
+3. Restart Pi
+4. `/lazy load some-name` or use its stubs
 
 Changes to package specs, stubs, shortcuts, or event triggers take effect after `/reload` or a
 process restart. `/lazy auto on|off` is the only configuration change applied immediately.
