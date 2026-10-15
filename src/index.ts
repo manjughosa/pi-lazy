@@ -22,7 +22,7 @@ import {
 } from "./config.ts";
 import { loadResolvedEntry, prefetchEntry } from "./loader.ts";
 import { migrateSettings } from "./migrate.ts";
-import { isModuleLazyInSettings, resolveSpecPaths, sourcesMatch, findSettingsPackageIndices, discoverSpecsFromSettings, normalizeSourceKey, npmPackageName } from "./resolve.ts";
+import { isModuleLazyInSettings, resolveSpecPaths, sourcesMatch, findSettingsPackageIndices, discoverSpecsFromSettings, discoverLocalExtensions, normalizeSourceKey, npmPackageName } from "./resolve.ts";
 import { performance } from "node:perf_hooks";
 import type { LazyConfig, LazySpec, LoadResult, ResolvedEntry } from "./types.ts";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
@@ -167,13 +167,35 @@ function scanIntoConfig(pi: ExtensionAPI, rt: Runtime, ctx: ExtensionContext, ag
 	}
 
 	const discovered = discoverSpecsFromSettings(packages, existingConfig.specs);
-	const next: LazyConfig = { ...existingConfig, specs: [...existingConfig.specs, ...discovered] };
+
+	// Local extensions under extensions/ are not packages: Pi discovers them by
+	// walking that directory, so no settings entry exists and no package filter
+	// applies. They are permanently eager unless registered as a package, which is
+	// what gives them a filter migrate can rewrite. Both halves are written here.
+	const localExts = discoverLocalExtensions(agentDir, [...existingConfig.specs, ...discovered]);
+	const localSettingsAdded = localExts.filter(
+		(e) => !packages.some((p) => (typeof p === "string" ? p : (p as { source?: unknown })?.source) === e.settingsEntry.source),
+	);
+
+	const next: LazyConfig = { ...existingConfig, specs: [...existingConfig.specs, ...discovered, ...localExts.map((e) => e.spec)] };
 
 	let backup = "";
 	if (hadExisting) {
 		const stamp = new Date().toISOString().replace(/[:.]/g, "-");
 		backup = `${currentPath}.bak.init-${stamp}`;
 		copyFileSync(currentPath, backup);
+	}
+
+	if (localSettingsAdded.length > 0 && existsSync(settingsPath)) {
+		try {
+			const parsed = JSON.parse(readFileSync(settingsPath, "utf-8")) as Record<string, unknown>;
+			if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && Array.isArray(parsed.packages)) {
+				parsed.packages = [...(parsed.packages as unknown[]), ...localSettingsAdded.map((e) => e.settingsEntry)];
+				atomicWriteJson(settingsPath, parsed);
+			}
+		} catch (err) {
+			settingsWarning = `settings.json could not be updated with local extensions: ${err instanceof Error ? err.message : String(err)}`;
+		}
 	}
 
 	const path = saveConfig(next, agentDir);
@@ -193,7 +215,12 @@ function scanIntoConfig(pi: ExtensionAPI, rt: Runtime, ctx: ExtensionContext, ag
 	} else {
 		lines.push(`added ${discovered.length} discovered package${discovered.length === 1 ? "" : "s"}:`);
 		for (const spec of discovered) lines.push(`  + ${spec.name}`);
-		lines.push("tune priority / cmd / lazy mode by hand — defaults are lazy:true.");
+		lines.push("left eager (lazy:false) — set lazy:true or after-start by hand to defer them.");
+	}
+	if (localExts.length > 0) {
+		lines.push(`added ${localExts.length} local extension${localExts.length === 1 ? "" : "s"} from extensions/:`);
+		for (const e of localExts) lines.push(`  + ${e.spec.name}  →  ${e.settingsEntry.extensions.join(", ")}`);
+		lines.push("left eager (lazy:false) — set lazy:true or after-start by hand to defer them.");
 	}
 	if (settingsWarning) lines.push(settingsWarning);
 	return lines;

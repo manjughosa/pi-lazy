@@ -11,10 +11,19 @@ How to read this file:
 - **Patches (P1–P11)** — the canonical IDs we use across source, dist, and `LOCAL-PATCHES.md`
   for traceability. New patches get the next number; renumbering never happens.
 
-## [Unreleased]
+## 0.6.0 — 2026-10-15
 
 ### Added
 
+- **Local extensions under `extensions/` are discoverable.** Pi walks `<agent-dir>/extensions/` and
+  loads whatever each folder's manifest declares, so those extensions have no `settings.packages`
+  entry and no `extensions` filter — which makes them invisible to this extension and impossible to
+  defer. `init` and `scan` now scan `extensions/*/package.json`, read each manifest's `pi.extensions`,
+  keep only declarations that resolve to real files, and register each directory **as a package**
+  (spec plus a `settings.packages` entry). That registration is what gives the entrypoint a filter,
+  and the filter is what actually defers the factory. Folders without a usable manifest are skipped
+  rather than guessed at — a bare directory contributes nothing, and a spec for it would produce an
+  entry that fails to load forever.
 - **`/lazy snapshot <name>`** — save the whole loading scheme under a name. A snapshot captures the
   catalog, its global switches, **and** the `settings.json` package list with each entry's
   `extensions` filter form intact. Catalog-only saving was tried first and is not sufficient:
@@ -57,6 +66,12 @@ How to read this file:
 
 ### Changed
 
+- **Discovery no longer defaults to `lazy: true`; new specs are added eager (`lazy: false`).**
+  `init` discovers what is installed, it does not decide when anything loads. Defaulting to deferred
+  meant a single `/lazy init` could silently re-time a whole stack — and if one of the newly deferred
+  packages was pi-lazy itself, the manager would take itself out of the session, its filters would
+  never be applied, and every package it manages would stop loading. The status quo (eager, which is
+  how Pi already had them) is now the default, and deferral is opt-in per package.
 - `/lazy enable`, `/lazy disable` and `/lazy restore` now run `/lazy migrate` as their final step, so
   `lazy.json` and `settings.json` always land in the same state. This was the drift behind a class of
   silent no-ops: editing `lazy.json` alone changes intent but not behaviour, because Pi only reads
@@ -70,6 +85,8 @@ How to read this file:
 
 - No reload wrapper was added. Pi already exposes `/reload`, and a second entry point for the same
   operation is a naming collision waiting to happen; every new command points at Pi's own.
+- Keep pi-lazy's own spec at `lazy: false`. It is the mechanism that defers everything else, so it
+  cannot be deferred by itself; `lazy: true` on this package is a self-lockout, not a preference.
 
 ## 0.5.0 — 2026-10-15
 

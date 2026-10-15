@@ -238,13 +238,98 @@ export function discoverSpecsFromSettings(settingsPackages: unknown[], existing:
 		discovered.push({
 			name: specNameFromSource(source),
 			source,
-			lazy: true,
+			lazy: false,
 			keywords: [specNameFromSource(source)],
-			description: "auto-discovered from settings.json — tune priority/cmd by hand",
+			description: "auto-discovered from settings.json — stays eager; set lazy/after-start by hand to defer it",
 		});
 	});
 
 	return discovered;
+}
+
+/**
+ * Local extensions living in `<agent-dir>/extensions/<name>/`.
+ *
+ * These are not packages: Pi discovers them by walking that directory and loads
+ * whatever each folder's manifest declares, so no `settings.packages` entry
+ * exists and none of the `packages[].extensions` filters apply to them. That makes
+ * them permanently eager as far as this extension is concerned — a spec for one
+ * would be inert.
+ *
+ * Registering one as a package is the only way to bring it under lazy control:
+ * a package entry carries its own `extensions` filter, which is what actually
+ * defers the factory. So each discovered directory is returned as a spec *and* as
+ * the settings entry that gives it a filter, and the caller adds both.
+ *
+ * Folders without a usable manifest are skipped rather than guessed at: a bare
+ * directory with no `pi.extensions` and no index file contributes nothing, and
+ * adding a spec for it would produce an entry that fails to load forever.
+ */
+export function discoverLocalExtensions(agentDir: string, existing: LazySpec[]): Array<{ spec: LazySpec; settingsEntry: { source: string; extensions: string[] } }> {
+	const extensionsDir = join(agentDir, "extensions");
+	if (!existsSync(extensionsDir)) return [];
+
+	const covered = new Set(existing.map((spec) => normalizeSourceKey(spec.source)));
+	const found: Array<{ spec: LazySpec; settingsEntry: { source: string; extensions: string[] } }> = [];
+
+	let entries: Array<{ name: string; isDirectory: boolean }>;
+	try {
+		entries = readdirSync(extensionsDir, { withFileTypes: true })
+			.filter((e) => e.isDirectory())
+			.map((e) => ({ name: e.name, isDirectory: true }));
+	} catch {
+		return [];
+	}
+
+	for (const entry of entries) {
+		const dir = join(extensionsDir, entry.name);
+		const manifestPath = join(dir, "package.json");
+		if (!existsSync(manifestPath)) continue;
+
+		let declared: string[] = [];
+		try {
+			const manifest = JSON.parse(readFileSync(manifestPath, "utf-8")) as { name?: string; pi?: { extensions?: unknown } };
+			const list = manifest.pi?.extensions;
+			if (!Array.isArray(list)) continue;
+			declared = list.filter((v): v is string => typeof v === "string");
+		} catch {
+			continue;
+		}
+		if (declared.length === 0) continue;
+
+		// Keep only declarations that resolve to real files inside the package.
+		const usable = declared.filter((rel) => {
+			const resolved = resolve(dir, rel);
+			if (!existsSync(resolved)) return false;
+			try {
+				return statSync(resolved).isFile();
+			} catch {
+				return false;
+			}
+		});
+		if (usable.length === 0) continue;
+
+		const source = dir;
+		if (covered.has(normalizeSourceKey(source))) continue;
+
+		const name = specNameFromSource(source);
+		found.push({
+			spec: {
+				name,
+				source,
+				lazy: false,
+				keywords: [name],
+				description: "local extension under extensions/ — stays eager; set lazy/after-start by hand to defer it",
+			},
+			// Register it as a package so the entrypoint is pinned explicitly, but keep the
+			// package eager. The extension was already being loaded by the extensions/
+			// walk before this entry existed; registering it must not silently change when
+			// that happens, so the default is the status quo and deferral is opt-in.
+			settingsEntry: { source, extensions: usable.map((rel) => `+${rel.replace(/\\/g, "/")}`) },
+		});
+	}
+
+	return found;
 }
 
 /** Derive a readable spec name from a package source (npm:pkg, path, git URL). */

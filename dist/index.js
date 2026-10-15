@@ -905,12 +905,67 @@ function discoverSpecsFromSettings(settingsPackages, existing) {
     discovered.push({
       name: specNameFromSource(source),
       source,
-      lazy: true,
+      lazy: false,
       keywords: [specNameFromSource(source)],
-      description: "auto-discovered from settings.json \u2014 tune priority/cmd by hand"
+      description: "auto-discovered from settings.json \u2014 stays eager; set lazy/after-start by hand to defer it"
     });
   });
   return discovered;
+}
+function discoverLocalExtensions(agentDir, existing) {
+  const extensionsDir = join3(agentDir, "extensions");
+  if (!existsSync3(extensionsDir)) return [];
+  const covered = new Set(existing.map((spec) => normalizeSourceKey(spec.source)));
+  const found = [];
+  let entries;
+  try {
+    entries = readdirSync(extensionsDir, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => ({ name: e.name, isDirectory: true }));
+  } catch {
+    return [];
+  }
+  for (const entry of entries) {
+    const dir = join3(extensionsDir, entry.name);
+    const manifestPath = join3(dir, "package.json");
+    if (!existsSync3(manifestPath)) continue;
+    let declared = [];
+    try {
+      const manifest = JSON.parse(readFileSync3(manifestPath, "utf-8"));
+      const list = manifest.pi?.extensions;
+      if (!Array.isArray(list)) continue;
+      declared = list.filter((v) => typeof v === "string");
+    } catch {
+      continue;
+    }
+    if (declared.length === 0) continue;
+    const usable = declared.filter((rel) => {
+      const resolved = resolve(dir, rel);
+      if (!existsSync3(resolved)) return false;
+      try {
+        return statSync2(resolved).isFile();
+      } catch {
+        return false;
+      }
+    });
+    if (usable.length === 0) continue;
+    const source = dir;
+    if (covered.has(normalizeSourceKey(source))) continue;
+    const name = specNameFromSource(source);
+    found.push({
+      spec: {
+        name,
+        source,
+        lazy: false,
+        keywords: [name],
+        description: "local extension under extensions/ \u2014 stays eager; set lazy/after-start by hand to defer it"
+      },
+      // Register it as a package so the entrypoint is pinned explicitly, but keep the
+      // package eager. The extension was already being loaded by the extensions/
+      // walk before this entry existed; registering it must not silently change when
+      // that happens, so the default is the status quo and deferral is opt-in.
+      settingsEntry: { source, extensions: usable.map((rel) => `+${rel.replace(/\\/g, "/")}`) }
+    });
+  }
+  return found;
 }
 function specNameFromSource(source) {
   const bare = source.startsWith("npm:") ? source.slice(4) : source;
@@ -1138,12 +1193,27 @@ function scanIntoConfig(pi, rt, ctx, agentDir) {
     settingsWarning = "settings.json not found \u2014 no packages could be scanned.";
   }
   const discovered = discoverSpecsFromSettings(packages, existingConfig.specs);
-  const next = { ...existingConfig, specs: [...existingConfig.specs, ...discovered] };
+  const localExts = discoverLocalExtensions(agentDir, [...existingConfig.specs, ...discovered]);
+  const localSettingsAdded = localExts.filter(
+    (e) => !packages.some((p) => (typeof p === "string" ? p : p?.source) === e.settingsEntry.source)
+  );
+  const next = { ...existingConfig, specs: [...existingConfig.specs, ...discovered, ...localExts.map((e) => e.spec)] };
   let backup = "";
   if (hadExisting) {
     const stamp = (/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-");
     backup = `${currentPath}.bak.init-${stamp}`;
     copyFileSync2(currentPath, backup);
+  }
+  if (localSettingsAdded.length > 0 && existsSync5(settingsPath)) {
+    try {
+      const parsed = JSON.parse(readFileSync5(settingsPath, "utf-8"));
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && Array.isArray(parsed.packages)) {
+        parsed.packages = [...parsed.packages, ...localSettingsAdded.map((e) => e.settingsEntry)];
+        atomicWriteJson(settingsPath, parsed);
+      }
+    } catch (err) {
+      settingsWarning = `settings.json could not be updated with local extensions: ${err instanceof Error ? err.message : String(err)}`;
+    }
   }
   const path = saveConfig(next, agentDir);
   rt.restartRequired = true;
@@ -1161,7 +1231,12 @@ backup: ${backup}` : ""}`);
   } else {
     lines.push(`added ${discovered.length} discovered package${discovered.length === 1 ? "" : "s"}:`);
     for (const spec of discovered) lines.push(`  + ${spec.name}`);
-    lines.push("tune priority / cmd / lazy mode by hand \u2014 defaults are lazy:true.");
+    lines.push("left eager (lazy:false) \u2014 set lazy:true or after-start by hand to defer them.");
+  }
+  if (localExts.length > 0) {
+    lines.push(`added ${localExts.length} local extension${localExts.length === 1 ? "" : "s"} from extensions/:`);
+    for (const e of localExts) lines.push(`  + ${e.spec.name}  \u2192  ${e.settingsEntry.extensions.join(", ")}`);
+    lines.push("left eager (lazy:false) \u2014 set lazy:true or after-start by hand to defer them.");
   }
   if (settingsWarning) lines.push(settingsWarning);
   return lines;

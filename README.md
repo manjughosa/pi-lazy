@@ -150,8 +150,10 @@ catalog is actually applied in the same step.
 
 To only merge, without touching `settings.json`, use `/lazy scan`.
 
-Newly discovered packages are added as `lazy: true` with a `keywords` entry derived from the package
-name. Tune `priority`, `cmd`, or `lazy` by hand afterwards.
+Newly discovered packages are added as `lazy: false` (**eager**) with a `keywords` entry derived from
+the package name, and local extensions under `extensions/` are registered the same way. Discovery
+records what is installed; it does not decide when anything loads. Set `lazy: true` or `after-start`
+by hand to defer a package.
 
 Only list packages you actually have installed — specs for missing packages will show up as
 errors when you try to load them.
@@ -393,6 +395,24 @@ triggers so they load on first real use instead.
 | `keywords` | no | Case-insensitive prompt substrings checked on `before_agent_start` |
 | `dependencies` | no | Other **spec names** to load first |
 | `description` | no | Human-readable note (shown in your own docs; not required at runtime) |
+
+### Local extensions under `extensions/`
+
+Extensions living in `<agent-dir>/extensions/<name>/` are not packages. Pi finds them by walking that
+directory and loads whatever each folder's manifest declares, so there is no `settings.packages`
+entry and no `extensions` filter — which means this extension cannot defer them at all. A spec alone
+would be inert.
+
+`/lazy init` and `/lazy scan` therefore register each discovered directory **as a package** (a spec
+plus a `settings.packages` entry), which is the only form that carries a filter and can be deferred.
+The package is added **eager**, matching how Pi was already loading it: discovery must not silently
+change load timing. Set `lazy: true` or `after-start` on the spec afterwards to actually defer it.
+
+Folders without a usable manifest are skipped rather than guessed at.
+
+> Keep pi-lazy itself eager (`lazy: false`). It is the thing that defers everything else, so
+deferring it makes it absent from the session, its filters never get applied, and every package it
+manages stops loading.
 
 ### Choosing what stays eager
 
