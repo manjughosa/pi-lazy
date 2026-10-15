@@ -29,7 +29,10 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          # Trusted publishing (OIDC) needs npm CLI >= 11.5.1, which ships with Node 24.
+          # Node 22 gives npm 10.x, where OIDC is not detected and the publish fails
+          # with a 2FA error even when the trusted publisher is configured correctly.
+          node-version: 24
           registry-url: "https://registry.npmjs.org"
           cache: npm
 
@@ -70,7 +73,7 @@ jobs:
             exit 1
           fi
           # Skip if this version is already on npm
-          if npm view "@rahularya01/pi-lazy@${PKG}" version >/dev/null 2>&1; then
+          if npm view "pi-lazy@${PKG}" version >/dev/null 2>&1; then
             echo "already_published=true" >> "$GITHUB_OUTPUT"
             echo "Version ${PKG} is already on npm — nothing to do"
           else
@@ -78,8 +81,17 @@ jobs:
           fi
           echo "version=${PKG}" >> "$GITHUB_OUTPUT"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-          echo "Publishing candidate @rahularya01/pi-lazy@${PKG} (${TAG})"
+          echo "Publishing candidate pi-lazy@${PKG} (${TAG})"
 
+      # Authentication is OIDC trusted publishing, not a token. npm CLI 11.5.1+
+      # detects the GitHub OIDC environment and mints a short-lived credential, so
+      # there is no NPM_TOKEN secret to create, leak, or rotate.
+      #
+      # Bootstrap caveat: a trusted publisher can only be configured on a package
+      # that already exists, so the very first release of a brand-new package must
+      # be published by hand. After that, npmjs.com -> package -> Settings ->
+      # Trusted publishing -> add this repo + workflow, and every later `v*` tag
+      # publishes itself.
       - name: Publish to npm
         if: steps.version.outputs.already_published != 'true'
         run: |
@@ -94,5 +106,3 @@ jobs:
             exit 0
           fi
           exit 1
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
