@@ -29,8 +29,11 @@ How to read this file:
   absent from it — and restoring that snapshot deregisters the package, which stops loading with no
   error anywhere. `init` is the command that discovers packages, so it is where this is repaired:
   after the catalog merge and migrate, each snapshot gains whatever spec or package entry it is
-  missing. Additive only — nothing is ever removed, and existing entries keep their own `extensions`
-  filter form, since that form is the reason the snapshot exists.
+  missing. Only what *that* `init` discovered is propagated — merging the whole live catalog instead
+  would converge every snapshot onto the current scheme, so a deliberately minimal one would silently
+  grow every package the current one happens to have. Additive only — nothing is ever removed, and
+  existing entries keep their own `extensions` filter form, since that form is the reason the snapshot
+  exists.
 - **`/lazy snapshot <name>`** — save the whole loading scheme under a name. A snapshot captures the
   catalog, its global switches, **and** the `settings.json` package list with each entry's
   `extensions` filter form intact. Catalog-only saving was tried first and is not sufficient:

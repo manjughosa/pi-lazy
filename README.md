@@ -638,12 +638,17 @@ folds the same spec and package entry into **every** saved snapshot:
 updated 2: work (+1 spec, +1 pkg), minimal (+1 spec, +1 pkg)
 ```
 
+**Only what that `init` actually discovered is propagated** — not the whole live catalog. This is the
+load-bearing part. Merging everything live would converge every snapshot onto the current scheme, so
+a deliberately minimal one would silently grow every package the current one happens to have, and
+running `init` a few times would leave you with several copies of the same scheme.
+
 The merge is **additive only**: nothing is ever removed from a snapshot, and entries already in it
 keep their own `extensions` filter form — that form is the reason the snapshot exists. It runs after
 `migrate`, so the new package lands in the snapshots in the same resolved shape it has live.
 
 So the sequence is: install the package, run `/lazy init`, and every scheme you switch to from then
-on already knows about it.
+on already knows about it. Schemes that were already missing it stay as they were.
 
 ### Drop a package from the scheme
 
