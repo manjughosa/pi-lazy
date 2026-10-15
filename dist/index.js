@@ -1042,8 +1042,8 @@ function migrateSettings(agentDir = getAgentDir3()) {
 
 // src/index.ts
 import { performance } from "node:perf_hooks";
-import { copyFileSync as copyFileSync2, existsSync as existsSync5, readFileSync as readFileSync5, writeFileSync as writeFileSync2 } from "node:fs";
-import { join as join4 } from "node:path";
+import { copyFileSync as copyFileSync2, existsSync as existsSync5, mkdirSync as mkdirSync2, readFileSync as readFileSync5, readdirSync as readdirSync2, unlinkSync as unlinkSync2, writeFileSync as writeFileSync2 } from "node:fs";
+import { basename, dirname as dirname3, join as join4 } from "node:path";
 var MAX_ADAPTIVE_YIELD_MS = 250;
 var PAUSE_TIMEOUT_MS = 6e4;
 function sleep(ms) {
@@ -1166,6 +1166,449 @@ backup: ${backup}` : ""}`);
   if (settingsWarning) lines.push(settingsWarning);
   return lines;
 }
+function snapshotDir(agentDir) {
+  return join4(agentDir, "lazy-snapshots");
+}
+function snapshotPathFor(agentDir, name) {
+  const trimmed = name.trim();
+  if (!trimmed || trimmed === "." || trimmed === ".." || /[\\/:*?"<>|]/.test(trimmed)) return null;
+  return join4(snapshotDir(agentDir), `${trimmed}.json`);
+}
+function snapshotSave(agentDir, name) {
+  const path = snapshotPathFor(agentDir, name);
+  const fail = (error) => ({ ok: false, path: path ?? "", specCount: 0, packageCount: 0, overwrote: false, error });
+  if (!path) return fail(`invalid snapshot name "${name}" (avoid / \\ : * ? " < > | )`);
+  const config = loadConfig(agentDir);
+  let packages = null;
+  const settingsPath = getSettingsPath(agentDir);
+  if (existsSync5(settingsPath)) {
+    try {
+      const parsed = JSON.parse(readFileSync5(settingsPath, "utf-8"));
+      packages = Array.isArray(parsed?.packages) ? parsed.packages : [];
+    } catch (err) {
+      return fail(`settings.json unreadable, cannot capture packages: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  } else {
+    return fail("settings.json not found \u2014 cannot capture a loading scheme without it");
+  }
+  try {
+    mkdirSync2(snapshotDir(agentDir), { recursive: true });
+    let previous;
+    if (existsSync5(path)) {
+      previous = `${path}.bak-${(/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-")}`;
+      copyFileSync2(path, previous);
+    }
+    atomicWriteJson(path, {
+      name: name.trim(),
+      savedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      version: 2,
+      config,
+      settings: { packages }
+    });
+    return { ok: true, path, specCount: config.specs.length, packageCount: packages.length, overwrote: previous !== void 0, previous };
+  } catch (err) {
+    return fail(err instanceof Error ? err.message : String(err));
+  }
+}
+function snapshotRestore(agentDir, name) {
+  const path = snapshotPathFor(agentDir, name);
+  const empty = { ok: false, specCount: 0, packageCount: 0, added: [], removed: [], migrated: 0, backups: [] };
+  if (!path || !existsSync5(path)) return { ...empty, error: `no saved snapshot named "${name}"` };
+  let snapshot;
+  try {
+    snapshot = JSON.parse(readFileSync5(path, "utf-8"));
+  } catch (err) {
+    return { ...empty, error: `snapshot unreadable: ${err instanceof Error ? err.message : String(err)}` };
+  }
+  if (!snapshot.config || !Array.isArray(snapshot.config.specs)) {
+    return { ...empty, error: "snapshot has no spec list \u2014 was it written by an older version?" };
+  }
+  if (!Array.isArray(snapshot.settings?.packages)) {
+    return { ...empty, error: "snapshot carries no settings.packages \u2014 save it again with this version (a spec-only snapshot cannot register its packages)" };
+  }
+  const current = loadConfig(agentDir);
+  const settingsPath = getSettingsPath(agentDir);
+  const stamp = (/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-");
+  const backups = [];
+  const currentPackages = (() => {
+    if (!existsSync5(settingsPath)) return [];
+    try {
+      const parsed = JSON.parse(readFileSync5(settingsPath, "utf-8"));
+      return Array.isArray(parsed?.packages) ? parsed.packages : [];
+    } catch {
+      return [];
+    }
+  })();
+  const sourceOf = (entry) => {
+    const s = typeof entry === "string" ? entry : entry?.source;
+    return typeof s === "string" ? s : null;
+  };
+  const nextSources = new Set(snapshot.settings.packages.map(sourceOf).filter((s) => s !== null));
+  const removed = currentPackages.map(sourceOf).filter((s) => s !== null && !nextSources.has(s));
+  const currentNames = new Set(current.specs.map((s) => s.name));
+  const added = snapshot.config.specs.map((s) => s.name).filter((n) => !currentNames.has(n));
+  try {
+    if (existsSync5(getLazyConfigPath(agentDir))) {
+      const b = `${getLazyConfigPath(agentDir)}.bak.snapshot-${stamp}`;
+      copyFileSync2(getLazyConfigPath(agentDir), b);
+      backups.push(b);
+    }
+    if (existsSync5(settingsPath)) {
+      const b = `${settingsPath}.bak.snapshot-${stamp}`;
+      copyFileSync2(settingsPath, b);
+      backups.push(b);
+    }
+    let settings = null;
+    if (existsSync5(settingsPath)) {
+      const parsed = JSON.parse(readFileSync5(settingsPath, "utf-8"));
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) settings = parsed;
+    }
+    if (settings) {
+      settings.packages = snapshot.settings.packages;
+      atomicWriteJson(settingsPath, settings);
+    }
+    saveConfig(snapshot.config, agentDir);
+    const migration = migrateSettings(agentDir);
+    return {
+      ok: migration.ok,
+      specCount: snapshot.config.specs.length,
+      packageCount: snapshot.settings.packages.length,
+      added,
+      removed,
+      migrated: migration.changed.length,
+      backups,
+      ...migration.ok ? {} : { error: `migrate failed: ${migration.error}` }
+    };
+  } catch (err) {
+    return { ...empty, backups, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+function snapshotDelete(agentDir, name) {
+  const path = snapshotPathFor(agentDir, name);
+  if (!path || !existsSync5(path)) return { ok: false, error: `no saved snapshot named "${name}"` };
+  try {
+    unlinkSync2(path);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+function snapshotList(agentDir) {
+  const dir = snapshotDir(agentDir);
+  if (!existsSync5(dir)) return [];
+  try {
+    return readdirSync2(dir).filter((f) => f.endsWith(".json") && !f.includes(".bak-")).map((f) => {
+      try {
+        const parsed = JSON.parse(readFileSync5(join4(dir, f), "utf-8"));
+        return {
+          name: f.replace(/\.json$/, ""),
+          specCount: parsed.config?.specs?.length ?? 0,
+          packageCount: parsed.settings?.packages?.length ?? 0,
+          savedAt: parsed.savedAt ?? "unknown"
+        };
+      } catch {
+        return { name: f.replace(/\.json$/, ""), specCount: 0, packageCount: 0, savedAt: "unreadable" };
+      }
+    }).sort((a, b) => a.savedAt < b.savedAt ? 1 : -1);
+  } catch {
+    return [];
+  }
+}
+function rescueNative(agentDir) {
+  const configPath = getLazyConfigPath(agentDir);
+  const settingsPath = getSettingsPath(agentDir);
+  const config = loadConfig(agentDir);
+  const specsCleared = config.specs.length;
+  const handedBack = [];
+  const keptOverrides = [];
+  let settings = null;
+  if (existsSync5(settingsPath)) {
+    try {
+      const parsed = JSON.parse(readFileSync5(settingsPath, "utf-8"));
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) settings = parsed;
+    } catch (err) {
+      return { ok: false, handedBack, keptOverrides, specsCleared, backups: [], error: `settings.json unreadable: ${err instanceof Error ? err.message : String(err)}` };
+    }
+  }
+  const stamp = (/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-");
+  const backups = [];
+  if (existsSync5(configPath)) {
+    const b = `${configPath}.bak.rescue-${stamp}`;
+    copyFileSync2(configPath, b);
+    backups.push(b);
+  }
+  if (settings && existsSync5(settingsPath)) {
+    const b = `${settingsPath}.bak.rescue-${stamp}`;
+    copyFileSync2(settingsPath, b);
+    backups.push(b);
+  }
+  try {
+    if (settings && Array.isArray(settings.packages)) {
+      settings.packages = settings.packages.map((entry) => {
+        if (!entry || typeof entry !== "object") return entry;
+        const obj = entry;
+        if (!(Array.isArray(obj.extensions) && obj.extensions.length === 0)) {
+          const src = typeof obj.source === "string" ? obj.source : null;
+          if (src && Array.isArray(obj.extensions)) keptOverrides.push(src);
+          return entry;
+        }
+        const { extensions, ...rest } = obj;
+        if (typeof rest.source === "string") {
+          handedBack.push(rest.source);
+          return rest.source;
+        }
+        handedBack.push("(unnamed)");
+        return rest;
+      });
+      atomicWriteJson(settingsPath, settings);
+    }
+    saveConfig({ ...config, specs: [] }, agentDir);
+  } catch (err) {
+    return { ok: false, handedBack, keptOverrides, specsCleared, backups, error: err instanceof Error ? err.message : String(err) };
+  }
+  return { ok: true, handedBack, keptOverrides, specsCleared, backups };
+}
+var ROSTER_PATH = "lazy-roster.json";
+function rosterPath(agentDir) {
+  return join4(agentDir, ROSTER_PATH);
+}
+function loadRoster(agentDir) {
+  const path = rosterPath(agentDir);
+  if (existsSync5(path)) {
+    try {
+      const parsed = JSON.parse(readFileSync5(path, "utf-8"));
+      if (parsed && Array.isArray(parsed.all)) return parsed;
+    } catch {
+    }
+  }
+  return buildRoster(agentDir);
+}
+function buildRoster(agentDir) {
+  const config = loadConfig(agentDir);
+  const seen = /* @__PURE__ */ new Map();
+  for (const spec of config.specs) {
+    seen.set(normalizeSourceKey(spec.source), {
+      name: spec.name,
+      source: spec.source,
+      mode: typeof spec.lazy === "boolean" ? spec.lazy ? "lazy" : "eager" : String(spec.lazy)
+    });
+  }
+  const settingsPath = getSettingsPath(agentDir);
+  if (existsSync5(settingsPath)) {
+    try {
+      const parsed = JSON.parse(readFileSync5(settingsPath, "utf-8"));
+      for (const entry of parsed.packages ?? []) {
+        const src = typeof entry === "string" ? entry : entry?.source;
+        if (typeof src !== "string" || seen.has(normalizeSourceKey(src))) continue;
+        seen.set(normalizeSourceKey(src), {
+          name: (npmPackageName(src) ?? src).split("/").pop() ?? src,
+          source: src,
+          mode: typeof entry === "string" ? "eager" : "custom"
+        });
+      }
+    } catch {
+    }
+  }
+  return { version: 1, generatedAt: (/* @__PURE__ */ new Date()).toISOString(), all: [...seen.values()] };
+}
+function refreshRoster(agentDir) {
+  const roster = buildRoster(agentDir);
+  try {
+    atomicWriteJson(rosterPath(agentDir), roster);
+  } catch (err) {
+    console.error(`[pi-lazy] failed to write roster: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  return roster;
+}
+function formatRoster(roster, verb) {
+  if (roster.all.length === 0) return "no packages recorded \u2014 run /lazy init first";
+  return [
+    `packages for /lazy ${verb} (${roster.all.length}, from lazy-roster.json):`,
+    ...roster.all.map((e) => `  ${e.name}  [${e.mode}]  ${e.source}`),
+    "",
+    `usage: /lazy ${verb} <name>`
+  ].join("\n");
+}
+function enablePackage(agentDir, name) {
+  const configPath = getLazyConfigPath(agentDir);
+  const settingsPath = getSettingsPath(agentDir);
+  const config = loadConfig(agentDir);
+  if (config.specs.some((s) => s.name === name || sourcesMatch(s.source, name))) {
+    const existing = config.specs.find((s) => s.name === name || sourcesMatch(s.source, name));
+    return {
+      ok: true,
+      restoredSpec: false,
+      restoredEntry: false,
+      mode: existing ? typeof existing.lazy === "boolean" ? existing.lazy ? "lazy" : "eager" : String(existing.lazy) : void 0,
+      backups: [],
+      noop: true
+    };
+  }
+  let recovered = null;
+  let specBackup = null;
+  if (existsSync5(configPath)) {
+    const dir = dirname3(configPath);
+    const stamp2 = (/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-");
+    let candidates = [];
+    try {
+      candidates = readdirSync2(dir).filter((f) => f.startsWith(`${basename(configPath)}.bak.disable-`)).sort().reverse();
+    } catch {
+      candidates = [];
+    }
+    for (const file of candidates) {
+      try {
+        const snap = JSON.parse(readFileSync5(join4(dir, file), "utf-8"));
+        const hit = snap.specs?.find((s) => s.name === name || sourcesMatch(s.source, name));
+        if (hit) {
+          recovered = hit;
+          specBackup = join4(dir, file);
+          break;
+        }
+      } catch {
+      }
+    }
+  }
+  let settings = null;
+  if (existsSync5(settingsPath)) {
+    try {
+      const parsed = JSON.parse(readFileSync5(settingsPath, "utf-8"));
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) settings = parsed;
+    } catch (err) {
+      return { ok: false, restoredSpec: false, backups: [], error: `settings.json unreadable: ${err instanceof Error ? err.message : String(err)}` };
+    }
+  }
+  const packages = settings && Array.isArray(settings.packages) ? [...settings.packages] : [];
+  let entry = null;
+  let settingsBackup = null;
+  if (existsSync5(settingsPath)) {
+    const dir = dirname3(settingsPath);
+    const base = basename(settingsPath);
+    let candidates = [];
+    try {
+      candidates = readdirSync2(dir).filter((f) => f.startsWith(`${base}.bak.disable-`)).sort().reverse();
+    } catch {
+      candidates = [];
+    }
+    for (const file of candidates) {
+      try {
+        const snap = JSON.parse(readFileSync5(join4(dir, file), "utf-8"));
+        const hit = (snap.packages ?? []).find((p) => {
+          const src = typeof p === "string" ? p : p?.source;
+          return typeof src === "string" && (sourcesMatch(src, name) || sourcesMatch(src, recovered?.source ?? name));
+        });
+        if (hit) {
+          entry = hit;
+          settingsBackup = join4(dir, file);
+          break;
+        }
+      } catch {
+      }
+    }
+  }
+  const source = recovered?.source ?? (typeof entry === "string" ? entry : entry?.source) ?? name;
+  if (!recovered && !entry) {
+    return {
+      ok: false,
+      restoredSpec: false,
+      backups: [],
+      error: `no record of "${name}" in any *.bak.disable-* snapshot \u2014 re-add the spec to lazy.json by hand`
+    };
+  }
+  const stamp = (/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-");
+  const backups = [];
+  if (existsSync5(configPath)) {
+    const b = `${configPath}.bak.enable-${stamp}`;
+    copyFileSync2(configPath, b);
+    backups.push(b);
+  }
+  if (existsSync5(settingsPath)) {
+    const b = `${settingsPath}.bak.enable-${stamp}`;
+    copyFileSync2(settingsPath, b);
+    backups.push(b);
+  }
+  try {
+    if (recovered) {
+      const next = { ...config, specs: [...config.specs, recovered] };
+      saveConfig(next, agentDir);
+    }
+    if (settings && entry && !packages.some((p) => {
+      const src = typeof p === "string" ? p : p?.source;
+      return typeof src === "string" && sourcesMatch(src, source);
+    })) {
+      settings.packages = [...packages, entry];
+      atomicWriteJson(settingsPath, settings);
+    }
+  } catch (err) {
+    return { ok: false, restoredSpec: false, backups, error: err instanceof Error ? err.message : String(err) };
+  }
+  const migration = migrateSettings(agentDir);
+  return {
+    ok: true,
+    restoredSpec: recovered !== null,
+    restoredEntry: entry !== null,
+    mode: recovered ? typeof recovered.lazy === "boolean" ? recovered.lazy ? "lazy" : "eager" : String(recovered.lazy) : void 0,
+    specFrom: specBackup ?? void 0,
+    entryFrom: settingsBackup ?? void 0,
+    migrated: migration.ok ? migration.changed.length : 0,
+    migrateSkipped: migration.ok ? migration.skipped.length : 0,
+    migrateError: migration.ok ? void 0 : migration.error,
+    backups
+  };
+}
+function disablePackage(agentDir, name) {
+  const configPath = getLazyConfigPath(agentDir);
+  const settingsPath = getSettingsPath(agentDir);
+  const config = loadConfig(agentDir);
+  const spec = config.specs.find((s) => s.name === name) ?? config.specs.find((s) => sourcesMatch(s.source, name)) ?? config.specs.find((s) => s.name.toLowerCase().includes(name.toLowerCase()));
+  if (!spec) {
+    return { ok: true, noop: true, droppedFromSettings: false, backups: [] };
+  }
+  let settings = null;
+  if (existsSync5(settingsPath)) {
+    try {
+      const parsed = JSON.parse(readFileSync5(settingsPath, "utf-8"));
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) settings = parsed;
+    } catch (err) {
+      return { ok: false, droppedFromSettings: false, backups: [], error: `settings.json unreadable: ${err instanceof Error ? err.message : String(err)}` };
+    }
+  }
+  const packages = settings && Array.isArray(settings.packages) ? [...settings.packages] : [];
+  const keep = packages.filter((entry) => {
+    const src = typeof entry === "string" ? entry : entry?.source;
+    return typeof src !== "string" || !sourcesMatch(src, spec.source);
+  });
+  const droppedFromSettings = keep.length !== packages.length;
+  const stamp = (/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-");
+  const backups = [];
+  if (existsSync5(configPath)) {
+    const backup = `${configPath}.bak.disable-${stamp}`;
+    copyFileSync2(configPath, backup);
+    backups.push(backup);
+  }
+  if (droppedFromSettings && settings && existsSync5(settingsPath)) {
+    const backup = `${settingsPath}.bak.disable-${stamp}`;
+    copyFileSync2(settingsPath, backup);
+    backups.push(backup);
+  }
+  try {
+    const next = { ...config, specs: config.specs.filter((s) => s !== spec) };
+    saveConfig(next, agentDir);
+    if (settings && droppedFromSettings) {
+      settings.packages = keep;
+      atomicWriteJson(settingsPath, settings);
+    }
+  } catch (err) {
+    return { ok: false, droppedFromSettings, backups, error: err instanceof Error ? err.message : String(err) };
+  }
+  const migration = migrateSettings(agentDir);
+  return {
+    ok: true,
+    droppedFromSettings,
+    migrated: migration.ok ? migration.changed.length : 0,
+    migrateSkipped: migration.ok ? migration.skipped.length : 0,
+    backups
+  };
+}
 function refreshStatus(pi, rt, ctx) {
   rt.status = formatStatus(rt);
   globalThis.__piLazyStatus = rt.status;
@@ -1229,7 +1672,10 @@ function runDoctor(agentDir, rt) {
     }
     const entry = packages[idx[0]];
     if (typeof entry === "string") {
-      if (managed) lines.push(`! ${spec.name}: \u7EAF\u5B57\u7B26\u4E32 = \u672A migrate\uFF0Clazy=${JSON.stringify(spec.lazy)} \u672A\u751F\u6548 \u2192 \u8DD1 /lazy migrate`);
+      if (managed)
+        lines.push(
+          `\xB7 ${spec.name}: \u7EAF\u5B57\u7B26\u4E32 = pi \u542F\u52A8\u5373\u52A0\u8F7D\uFF08\u73B0\u5728\u5C31\u662F\u53EF\u7528\u72B6\u6001\uFF09\u3002lazy=${JSON.stringify(spec.lazy)} \u5C1A\u672A\u63A5\u7BA1\uFF1B\u8DD1 /lazy migrate \u4F1A\u6539\u5199\u6210 [] \u4EA4\u7ED9 lazy\uFF0C\u5C4A\u65F6\u8981\u7B49 after-start/\u89E6\u53D1\u624D\u51FA\u73B0`
+        );
       continue;
     }
     const filters = Array.isArray(entry.extensions) ? entry.extensions : [];
@@ -1241,14 +1687,30 @@ function runDoctor(agentDir, rt) {
     } else {
       lines.push(`! ${spec.name}: \u5E26\u653E\u884C\u6807\u8BB0 ${JSON.stringify(filters)} \u2192 \u4E0B\u6B21 /lazy migrate \u4F1A\u6536\u56DE\u4E3A []`);
     }
-    const triggers = (spec.cmd ?? []).length + (spec.tools ?? []).length + (spec.keywords ?? []).length + (spec.event ?? []).length;
+    const triggers = (spec.cmd ?? []).length + (spec.tools ?? []).length + (spec.keys ?? []).length + (spec.keywords ?? []).length + (spec.event ?? []).length;
     if (spec.lazy === true && triggers === 0) {
       lines.push(`   \u21B3 \u65E0\u89E6\u53D1\u5165\u53E3\uFF08lazy=true\uFF09\uFF1A\u53EA\u80FD /lazy load ${spec.name}\uFF08\u6216\u6A21\u578B\u8C03 lazy_load\uFF09`);
     }
   }
   const specSources = rt.config.specs.map((s) => s.source);
-  const outside = packages.map(sourceOf).filter((src) => src && !specSources.some((s) => sourcesMatch(src, s)));
-  if (outside.length) lines.push(`- \u672A\u7EB3\u5165 lazy\uFF08\u542F\u52A8\u5373\u52A0\u8F7D\uFF09: ${outside.join(", ")}`);
+  const outside = packages.filter((p) => {
+    const src = sourceOf(p);
+    return !!src && !specSources.some((s) => sourcesMatch(src, s));
+  });
+  const nobodyLoads = [];
+  const eagerOutside = [];
+  for (const p of outside) {
+    const src = sourceOf(p);
+    const ext = typeof p === "object" && p !== null ? p.extensions : void 0;
+    if (Array.isArray(ext) && ext.length === 0) nobodyLoads.push(src);
+    else eagerOutside.push(src);
+  }
+  if (nobodyLoads.length) {
+    lines.push(`X \u6CA1\u4EBA\u52A0\u8F7D\uFF08settings \u662F extensions:[] \u4F46 lazy.json \u91CC\u6CA1\u6709\u5B83 \u2192 pi \u4E0D\u52A0\u8F7D\u3001lazy \u4E5F\u4E0D\u7BA1\uFF09: ${nobodyLoads.join(", ")}`);
+    lines.push(`   \u21B3 \u540E\u679C\uFF1A\u8FD9\u4E9B\u5305\u7684\u547D\u4EE4/\u5DE5\u5177\u90FD\u4E0D\u4F1A\u6CE8\u518C\uFF08pi-extmgr \u6574\u4E2A\u5931\u6548\u5C31\u662F\u8FD9\u6761\uFF09`);
+    lines.push(`   \u21B3 \u4FEE\u6CD5\u4E8C\u9009\u4E00\uFF1A\u2460 settings \u91CC\u6539\u56DE\u666E\u901A\u5B57\u7B26\u4E32\uFF0C\u8BA9 pi \u542F\u52A8\u5373\u52A0\u8F7D\uFF1B\u2461 \u52A0\u8FDB lazy.json \u5E76\u5199\u5BF9\u89E6\u53D1\u540D`);
+  }
+  if (eagerOutside.length) lines.push(`- \u672A\u7EB3\u5165 lazy\uFF08\u542F\u52A8\u5373\u52A0\u8F7D\uFF09: ${eagerOutside.join(", ")}`);
   if (rt.entries && typeof rt.entries.values === "function") {
     const all = [...rt.entries.values()];
     for (const e of all) {
@@ -1262,6 +1724,21 @@ function runDoctor(agentDir, rt) {
     }
     const loaded = all.filter((e) => e.state === "loaded").length;
     lines.push(`\xB7 \u8FD0\u884C\u6001: ${loaded} loaded / ${all.filter((e) => e.state === "pending").length} pending / ${all.filter((e) => e.state === "eager").length} eager${rt.afterStartQueued ? " (after-start \u961F\u5217\u8FDB\u884C\u4E2D)" : ""}`);
+  }
+  const extmgrFile = join4(agentDir, "npm", "node_modules", "pi-extmgr", "src", "packages", "extensions.ts");
+  if (rt.config.managerCompat !== true) {
+    lines.push(`- extmgr \u517C\u5BB9\u8865\u4E01: \u5173\u95ED\uFF08lazy.json \u91CC managerCompat \u4E0D\u662F true\uFF09\u2192 \u9762\u677F\u4F1A\u628A\u61D2\u52A0\u8F7D\u5305\u663E\u793A\u6210 Disabled`);
+  } else if (!existsSync5(extmgrFile)) {
+    lines.push(`\xB7 extmgr \u517C\u5BB9\u8865\u4E01: \u672A\u5B89\u88C5 pi-extmgr\uFF0C\u8DF3\u8FC7`);
+  } else {
+    let patched = false;
+    try {
+      patched = readFileSync5(extmgrFile, "utf-8").includes("__piLazyManagedSources");
+    } catch {
+    }
+    lines.push(
+      patched ? `\xB7 extmgr \u517C\u5BB9\u8865\u4E01: \u5DF2\u5C31\u4F4D\uFF08\u91CD\u88C5/\u66F4\u65B0 pi-extmgr \u4F1A\u51B2\u6389\uFF1B\u91CD\u542F pi \u6216\u518D\u8DD1\u4E00\u6B21 /lazy doctor \u4F1A\u81EA\u52A8\u8865\u56DE\uFF09` : `X extmgr \u517C\u5BB9\u8865\u4E01: \u66FE\u7F3A\u5931\uFF0C\u672C\u6B21\u5DF2\u81EA\u52A8\u8865\u56DE \u2192 \u9700\u91CD\u542F pi \u624D\u751F\u6548\uFF08\u9762\u677F\u6A21\u5757\u4E00\u65E6\u52A0\u8F7D\u5C31\u7F13\u5B58\u5230\u8FDB\u7A0B\u7ED3\u675F\uFF09`
+    );
   }
   return lines.length ? lines : ["clean: \u672A\u53D1\u73B0\u5F02\u5E38"];
 }
@@ -1763,12 +2240,20 @@ function createPiLazy(pi, agentDir = getAgentDir4()) {
     drainResumeWaiters(rt);
   });
   pi.registerCommand("lazy", {
-    description: "LazyVim-style extension manager (list|load|migrate|auto|init|scan|status|doctor)",
+    description: "LazyVim-style extension manager (list|load|disable|enable|rescue|snapshot|restore|migrate|auto|init|scan|status|doctor)",
     getArgumentCompletions: (prefix) => {
-      const sub = ["status", "list", "load", "migrate", "auto", "init", "scan", "config", "profile", "doctor"];
-      const names = [...rt.entries.keys()].map((n) => `load ${n}`);
-      const items = [...sub, ...names, "auto on", "auto off"].map((v) => ({ value: v, label: v }));
-      const filtered = items.filter((i) => i.value.startsWith(prefix) || i.value.includes(prefix));
+      const sub = ["status", "list", "load", "migrate", "auto", "init", "scan", "disable", "enable", "rescue", "restore", "snapshot", "config", "profile", "doctor"];
+      const items = [...sub, "auto on", "auto off"];
+      for (const n of rt.entries.keys()) items.push(`load ${n}`);
+      const roster = loadRoster(agentDir);
+      for (const e of roster.all) {
+        items.push(`enable ${e.name}`, `disable ${e.name}`);
+      }
+      for (const s of snapshotList(agentDir)) {
+        items.push(`restore ${s.name}`, `snapshot delete ${s.name}`);
+      }
+      const mapped = items.map((v) => ({ value: v, label: v }));
+      const filtered = mapped.filter((i) => i.value.startsWith(prefix) || i.value.includes(prefix));
       return filtered.length ? filtered : null;
     },
     handler: async (args, ctx) => {
@@ -1811,6 +2296,7 @@ function createPiLazy(pi, agentDir = getAgentDir4()) {
         try {
           const scanLines = scanIntoConfig(pi, rt, ctx, agentDir);
           const result = migrateSettings(agentDir);
+          const roster = refreshRoster(agentDir);
           rt.restartRequired = true;
           const lines = [...scanLines, "", "\u2500\u2500 migrate \u2500\u2500"];
           if (!result.ok) {
@@ -1827,6 +2313,7 @@ function createPiLazy(pi, agentDir = getAgentDir4()) {
             }
             lines.push("Reload or restart Pi to apply it.");
           }
+          lines.push("", `\u2500\u2500 roster \u2500\u2500`, `${roster.all.length} packages recorded for /lazy disable and /lazy enable \u2192 ${rosterPath(agentDir)}`);
           ctx.ui.notify(lines.join("\n"), result.ok ? "info" : "warning");
         } catch (err) {
           ctx.ui.notify(`failed to initialize config: ${err instanceof Error ? err.message : String(err)}`, "error");
@@ -1870,7 +2357,156 @@ function createPiLazy(pi, agentDir = getAgentDir4()) {
         refreshStatus(pi, rt, ctx);
         return;
       }
+      if (sub === "snapshot" || sub === "snap") {
+        const snapshotName = rest.join(" ").trim();
+        if (snapshotName.toLowerCase() === "delete") {
+          const target = rest.slice(1).join(" ").trim();
+          if (!target) {
+            ctx.ui.notify("usage: /lazy snapshot delete <name>", "warning");
+            return;
+          }
+          const deleted = snapshotDelete(agentDir, target);
+          if (!deleted.ok) {
+            ctx.ui.notify(`snapshot delete failed: ${deleted.error}`, "error");
+            return;
+          }
+          ctx.ui.notify(`deleted snapshot "${target}"`, "info");
+          return;
+        }
+        if (!snapshotName) {
+          const listed = snapshotList(agentDir);
+          ctx.ui.notify(
+            listed.length === 0 ? `no snapshots saved \u2014 create one with /lazy snapshot <name>
+(storage: ${snapshotDir(agentDir)})` : ["saved snapshots:", ...listed.map((s) => `  ${s.name}  (${s.specCount} specs, ${s.packageCount} packages, ${s.savedAt})`), "", `storage: ${snapshotDir(agentDir)}`].join("\n"),
+            "info"
+          );
+          return;
+        }
+        const result = snapshotSave(agentDir, snapshotName);
+        if (!result.ok) {
+          ctx.ui.notify(`snapshot failed: ${result.error}`, "error");
+          return;
+        }
+        ctx.ui.notify(
+          [
+            `saved snapshot "${snapshotName}" \u2014 ${result.specCount} specs + ${result.packageCount} settings packages`,
+            `  \u2192 ${result.path}`,
+            result.overwrote ? `  overwrote previous (kept as ${result.previous})` : ""
+          ].filter(Boolean).join("\n"),
+          "info"
+        );
+        return;
+      }
+      if (sub === "restore") {
+        const snapshotName = rest.join(" ").trim();
+        if (!snapshotName) {
+          ctx.ui.notify("usage: /lazy restore <name>   \xB7   /lazy snapshot   to list saved snapshots", "warning");
+          return;
+        }
+        const result = snapshotRestore(agentDir, snapshotName);
+        if (!result.ok) {
+          ctx.ui.notify(`restore failed: ${result.error}`, "error");
+          return;
+        }
+        rt.config = loadConfig(agentDir);
+        refreshStatus(pi, rt, ctx);
+        ctx.ui.notify(
+          [
+            `restored snapshot "${snapshotName}" \u2014 scheme replaced (not merged)`,
+            `  lazy.json:     ${result.specCount} specs`,
+            `  settings.json: ${result.packageCount} packages registered`,
+            `  migrate:       ${result.migrated} entr${result.migrated === 1 ? "y" : "ies"} updated`,
+            result.added.length ? `  new specs:      ${result.added.join(", ")}` : "",
+            result.removed.length ? `  no longer registered: ${result.removed.join(", ")}` : "",
+            "  node_modules untouched \u2014 `pi install npm:<name>` brings any of them back",
+            ...result.backups.map((b) => `  backup: ${b}`),
+            "Not in effect yet \u2014 run /reload for the change to take effect."
+          ].filter(Boolean).join("\n"),
+          "info"
+        );
+        return;
+      }
+      if (sub === "rescue" || sub === "panic") {
+        const result = rescueNative(agentDir);
+        if (!result.ok) {
+          ctx.ui.notify(`rescue failed: ${result.error}`, "error");
+          return;
+        }
+        refreshStatus(pi, rt, ctx);
+        const lines = ["rescued \u2014 every package handed back to native Pi"];
+        lines.push(`  lazy.json: ${result.specsCleared} spec${result.specsCleared === 1 ? "" : "s"} cleared (file kept: deleting it would let lazy rebuild its catalog)`);
+        if (result.handedBack.length > 0) {
+          lines.push(`  settings.json: ${result.handedBack.length} package${result.handedBack.length === 1 ? "" : "s"} restored to eager:`);
+          for (const s of result.handedBack) lines.push(`    ${s}`);
+        } else {
+          lines.push("  settings.json: no lazy-written filters found \u2014 nothing to restore");
+        }
+        if (result.keptOverrides.length > 0) {
+          lines.push("  kept explicit entry filters (not written by lazy):");
+          for (const s of result.keptOverrides) lines.push(`    ${s}`);
+        }
+        for (const p of result.backups) lines.push(`  backup: ${p}`);
+        lines.push("Not in effect yet \u2014 run /reload for the change to take effect.");
+        lines.push("To come back: /lazy init (rebuild the catalog) or restore a *.bak.rescue-* file.");
+        ctx.ui.notify(lines.join("\n"), "info");
+        return;
+      }
+      if (sub === "enable" || sub === "en") {
+        const name = rest.join(" ").trim();
+        if (!name) {
+          ctx.ui.notify(formatRoster(loadRoster(agentDir), "enable"), "info");
+          return;
+        }
+        const result = enablePackage(agentDir, name);
+        if (!result.ok) {
+          ctx.ui.notify(`enable failed: ${result.error}`, "error");
+          return;
+        }
+        refreshStatus(pi, rt, ctx);
+        if (result.noop) {
+          ctx.ui.notify(`enabled ${name} \u2014 already in the loading scheme [${result.mode}], nothing to do`, "info");
+          return;
+        }
+        const lines = [`enabled ${name} \u2014 back in the loading scheme`];
+        if (result.restoredSpec) lines.push(`  lazy.json: spec restored [${result.mode}]${result.specFrom ? ` from ${basename(result.specFrom)}` : ""}`);
+        if (result.restoredEntry) lines.push(`  settings.json: package entry restored${result.entryFrom ? ` from ${basename(result.entryFrom)}` : ""}`);
+        lines.push(`  migrate: ${(result.migrated ?? 0) > 0 ? `${result.migrated} entr${result.migrated === 1 ? "y" : "ies"} updated` : "nothing to change"}`);
+        if (result.migrateError) lines.push(`  migrate error: ${result.migrateError}`);
+        lines.push("  node_modules: untouched \u2014 `pi install npm:<name>` if the package itself is gone");
+        for (const p of result.backups) lines.push(`  backup: ${p}`);
+        lines.push("Not in effect yet \u2014 run /reload for the change to take effect.");
+        ctx.ui.notify(lines.join("\n"), "info");
+        return;
+      }
+      if (sub === "disable" || sub === "d") {
+        const name = rest.join(" ").trim();
+        if (!name) {
+          ctx.ui.notify(formatRoster(loadRoster(agentDir), "disable"), "info");
+          return;
+        }
+        const result = disablePackage(agentDir, name);
+        if (!result.ok) {
+          ctx.ui.notify(`disable failed: ${result.error}`, "error");
+          return;
+        }
+        refreshStatus(pi, rt, ctx);
+        if (result.noop) {
+          ctx.ui.notify(`disabled ${name} \u2014 already out of the loading scheme, nothing to do`, "info");
+          return;
+        }
+        const lines = [`disabled ${name} \u2014 removed from the loading scheme`];
+        if (result.droppedFromSettings) lines.push("  settings.json: package entry removed");
+        else lines.push("  settings.json: no matching package entry (spec only)");
+        lines.push("  lazy.json: spec removed");
+        lines.push(`  migrate: ${(result.migrated ?? 0) > 0 ? `${result.migrated} entr${result.migrated === 1 ? "y" : "ies"} updated` : "nothing to change (this package is out of settings; migrate only confirms the rest of the catalog)"}`);
+        lines.push("  node_modules: untouched \u2014 `pi install npm:<name>` brings it back");
+        for (const p of result.backups) lines.push(`  backup: ${p}`);
+        lines.push("Not in effect yet \u2014 run /reload for the change to take effect.");
+        ctx.ui.notify(lines.join("\n"), "info");
+        return;
+      }
       if (sub === "doctor") {
+        ensureManagerCompat(agentDir, rt);
         ctx.ui.notify(runDoctor(agentDir, rt).join("\n"), "info");
         return;
       }
@@ -1895,7 +2531,7 @@ function createPiLazy(pi, agentDir = getAgentDir4()) {
         );
         return;
       }
-      ctx.ui.notify("usage: /lazy [status|list|profile|load <name>|init|scan|migrate|auto on|off|config]", "warning");
+      ctx.ui.notify("usage: /lazy [status|list|profile|load <name>|disable <name>|enable <name>|rescue|snapshot <name>|restore <name>|init|scan|migrate|auto on|off|config]", "warning");
     }
   });
   pi.registerTool({

@@ -454,6 +454,14 @@ So declare the commands and tools you actually want to trigger a load:
 | `/lazy auto on\|off` | Toggle auto-load and persist to `lazy.json` |
 | `/lazy init` | Scan `settings.json` for packages the catalog misses, add them, then run `/lazy migrate` |
 | `/lazy scan` (alias `s`) | Same catalog merge as `init`, **without** the migrate step |
+| `/lazy disable <name>` | Remove a package from the loading scheme (catalog spec + settings entry), then migrate. Leaves `node_modules` alone |
+| `/lazy enable <name>` | Restore a package disabled earlier (spec + settings entry from the newest `*.bak.disable-*` snapshot), then migrate |
+| `/lazy disable` / `/lazy enable` | List the full package roster recorded by the last `/lazy init` |
+| `/lazy rescue` | Hand every package back to native Pi: clear `extensions` filters and empty the catalog |
+| `/lazy snapshot <name>` | Save the whole loading scheme under a name |
+| `/lazy snapshot` | List saved snapshots (name, spec/package counts, saved-at) |
+| `/lazy snapshot delete <name>` | Delete one saved snapshot |
+| `/lazy restore <name>` | **Replace** the current scheme with a saved snapshot, then migrate |
 | `/lazy doctor` | Diagnose catalog vs settings vs runtime inconsistencies (invalid lazy values, duplicates, un-migrated entries, poisoned loads) |
 | `/lazy config` | Print the absolute path to `lazy.json` |
 | `/lazy profile` | Show in-session catalog, resolution, and load timings |
@@ -559,6 +567,86 @@ Manual `/lazy load` and stub `/cmd` / tools still work. Turn it back on with `/l
 
 Changes to package specs, stubs, shortcuts, or event triggers take effect after `/reload` or a
 process restart. `/lazy auto on|off` is the only configuration change applied immediately.
+
+### Switch between whole plugin setups
+
+A **snapshot** is the entire loading scheme — the catalog, its global switches, and the
+`settings.json` package list with each entry's `extensions` filter form intact. Storing only
+`lazy.json` cannot reproduce a scheme: the `packages` array is what Pi registers, and the filter
+form there (`[]` = module-lazy, `["+index.ts"]` = force one entrypoint, absent = eager) decides
+eager-vs-lazy behaviour no amount of spec editing can reproduce.
+
+```
+/lazy snapshot work      # save the current scheme
+/lazy snapshot           # list what is saved
+/lazy restore work       # switch to it
+```
+
+Snapshots live in `~/.pi/agent/lazy-snapshots/<name>.json`.
+
+`restore` is a **replacement, not a merge**. Restoring a scheme that uses `5,6,7,8` over one using
+`1,2,3,4` ends with exactly `5,6,7,8` — `1,2,3,4` are dropped from both `lazy.json` and
+`settings.packages`. This happens in three steps, and the first is the one that matters:
+
+1. `settings.packages` ← the snapshot's captured list (this is what unregisters `1,2,3,4`)
+2. `lazy.json` ← the snapshot's catalog
+3. `/lazy migrate` ← turns the snapshot's `lazy` modes into `extensions: []`
+
+Skip step 1 and the old packages stay registered and keep loading, which is why a
+catalog-only implementation produced `1,2,3,4,5,6,7,8` instead of `5,6,7,8`.
+
+Packages a snapshot does not mention are **reported, never deleted from disk**. Bring any of them
+back with `pi install npm:<name>`. Both files are backed up (`*.bak.restore-<stamp>`) before the
+first write.
+
+### Drop a package from the scheme
+
+```
+/lazy disable <name>     # alias: d
+```
+
+Removes the spec from `lazy.json` and the entry from `settings.packages`, then runs `/lazy migrate`.
+Named `disable` rather than remove/uninstall because `extensions: []` does not uninstall anything:
+Pi's package manager defaults every entry to enabled and applies `+`/`-` overrides on top, so an
+empty filter list just yields no enabled files while the package stays in `node_modules`.
+
+This is not a fourth `lazy` mode. The three modes decide *when* a catalog member loads; disabling
+decides whether it is a member at all. Both halves must go — a spec whose source is no longer
+registered is inert, and deleting only the spec would leave it listed as a permanently failing
+entry.
+
+The trailing migrate reports `nothing to change` for the disabled package itself — it is out of
+both files, so there is nothing left to translate — and confirms the rest of the catalog did not
+drift.
+
+Nothing is reloaded automatically. A loaded extension factory has no inverse operation (its tools,
+commands and handlers are already registered), so run Pi's own `/reload` when you want the change
+to take effect.
+
+### Put a package back
+
+```
+/lazy enable <name>      # alias: en
+```
+
+The mirror image of `disable`: the spec and the settings entry are restored from the most recent
+`*.bak.disable-*` snapshot that still contains them, so the original `lazy` / `after-start` / `eager`
+mode comes back with it. A migrate runs afterwards to translate that mode back into `extensions: []`
+— without it the restored entry would be registered but eager, which is exactly the drift the
+two-file design invites.
+
+`node_modules` is untouched in either direction: `pi install npm:<name>` remains the way to add or
+remove the package itself.
+
+Both verbs accept any package and report the state they find rather than failing:
+
+| Request | Reply |
+|---|---|
+| `disable` on an already-disabled package | `already out of the loading scheme, nothing to do` |
+| `enable` on an already-enabled package | `already in the loading scheme [mode], nothing to do` |
+
+Running either bare (`/lazy enable`, `/lazy disable`) lists the full roster recorded by the last
+`/lazy init`, so the packages offered while typing are the same set the commands accept.
 
 ### Undo migrate for one package
 

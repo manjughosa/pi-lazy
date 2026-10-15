@@ -13,6 +13,7 @@ import { Type } from "typebox";
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
 	DEFAULT_AFTER_START_INITIAL_DELAY_MS,
+	atomicWriteJson,
 	defaultConfig,
 	getLazyConfigPath,
 	isManagedLazy,
@@ -21,11 +22,11 @@ import {
 } from "./config.ts";
 import { loadResolvedEntry, prefetchEntry } from "./loader.ts";
 import { migrateSettings } from "./migrate.ts";
-import { isModuleLazyInSettings, resolveSpecPaths, sourcesMatch, findSettingsPackageIndices, discoverSpecsFromSettings } from "./resolve.ts";
+import { isModuleLazyInSettings, resolveSpecPaths, sourcesMatch, findSettingsPackageIndices, discoverSpecsFromSettings, normalizeSourceKey, npmPackageName } from "./resolve.ts";
 import { performance } from "node:perf_hooks";
 import type { LazyConfig, LazySpec, LoadResult, ResolvedEntry } from "./types.ts";
-import { copyFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import { getSettingsPath } from "./config.ts";
 
 interface Runtime {
@@ -198,6 +199,707 @@ function scanIntoConfig(pi: ExtensionAPI, rt: Runtime, ctx: ExtensionContext, ag
 	return lines;
 }
 
+/** Directory holding saved plugin snapshots. */
+function snapshotDir(agentDir: string): string {
+	return join(agentDir, "lazy-snapshots");
+}
+
+/** snapshot names are used as filenames, so restrict them to a safe subset. */
+function snapshotPathFor(agentDir: string, name: string): string | null {
+	const trimmed = name.trim();
+	if (!trimmed || trimmed === "." || trimmed === ".." || /[\\/:*?"<>|]/.test(trimmed)) return null;
+	return join(snapshotDir(agentDir), `${trimmed}.json`);
+}
+
+/**
+ * Snapshot the whole loading scheme to a named snapshot file.
+ *
+ * A snapshot is NOT just the catalog. `lazy.json` alone cannot reproduce a scheme:
+ * the `packages` array in settings.json is what pi actually registers, and the
+ * `extensions` filter form there (`[]` = module-lazy, `["+index.ts"]` = force a
+ * single entrypoint, absent = eager) decides eager-vs-lazy semantics that no
+ * amount of spec editing can reproduce. Saving only specs produced snapshots that
+ * loaded nothing on restore, because scan can only ever discover packages that
+ * settings already lists.
+ *
+ * So both halves are captured: `config` (the catalog + global switches) and
+ * `settings.packages` (the registration with each entry's filter form intact).
+ *
+ * Overwriting an existing snapshot keeps the previous file under `.bak-<stamp>`:
+ * silently losing one is how a snapshot system becomes a source of drift.
+ */
+function snapshotSave(agentDir: string, name: string): { ok: boolean; path: string; specCount: number; packageCount: number; overwrote: boolean; previous?: string; error?: string } {
+	const path = snapshotPathFor(agentDir, name);
+	const fail = (error: string) => ({ ok: false, path: path ?? "", specCount: 0, packageCount: 0, overwrote: false, error });
+	if (!path) return fail(`invalid snapshot name "${name}" (avoid / \\ : * ? " < > | )`);
+
+	const config = loadConfig(agentDir);
+	let packages: unknown[] | null = null;
+	const settingsPath = getSettingsPath(agentDir);
+	if (existsSync(settingsPath)) {
+		try {
+			const parsed = JSON.parse(readFileSync(settingsPath, "utf-8")) as { packages?: unknown };
+			packages = Array.isArray(parsed?.packages) ? parsed.packages : [];
+		} catch (err) {
+			return fail(`settings.json unreadable, cannot capture packages: ${err instanceof Error ? err.message : String(err)}`);
+		}
+	} else {
+		return fail("settings.json not found — cannot capture a loading scheme without it");
+	}
+
+	try {
+		mkdirSync(snapshotDir(agentDir), { recursive: true });
+		let previous: string | undefined;
+		if (existsSync(path)) {
+			previous = `${path}.bak-${new Date().toISOString().replace(/[:.]/g, "-")}`;
+			copyFileSync(path, previous);
+		}
+		atomicWriteJson(path, {
+			name: name.trim(),
+			savedAt: new Date().toISOString(),
+			version: 2,
+			config,
+			settings: { packages },
+		});
+		return { ok: true, path, specCount: config.specs.length, packageCount: packages.length, overwrote: previous !== undefined, previous };
+	} catch (err) {
+		return fail(err instanceof Error ? err.message : String(err));
+	}
+}
+
+interface SnapshotRestoreResult {
+	ok: boolean;
+	specCount: number;
+	packageCount: number;
+	added: string[];
+	removed: string[];
+	migrated: number;
+	backups: string[];
+	error?: string;
+}
+
+/**
+ * Replace the loading scheme with a saved snapshot — a swap, not a merge.
+ *
+ * Restoring 5678 over a live 1234 must yield exactly 5678, so all three halves
+ * are written:
+ *   1. settings.packages ← the snapshot's captured list (this is what removes 1234
+ *      from registration and adds 5678; a catalog-only write leaves 1234 loaded)
+ *   2. lazy.json        ← the snapshot's catalog
+ *   3. migrateSettings  ← turns the snapshot's `lazy` modes into `extensions: []`,
+ *      which is the only step that actually defers a package's factory
+ *
+ * Packages the snapshot does not mention are reported in `removed` rather than
+ * deleted from disk: node_modules is never touched, so switching schemes is
+ * reversible with one `pi install`.
+ *
+ * Both files are backed up first; this is a replacement and it is undoable via
+ * `/lazy restore` or by loading the previous snapshot again.
+ */
+function snapshotRestore(agentDir: string, name: string): SnapshotRestoreResult {
+	const path = snapshotPathFor(agentDir, name);
+	const empty: SnapshotRestoreResult = { ok: false, specCount: 0, packageCount: 0, added: [], removed: [], migrated: 0, backups: [] };
+	if (!path || !existsSync(path)) return { ...empty, error: `no saved snapshot named "${name}"` };
+
+	let snapshot: { config?: LazyConfig; settings?: { packages?: unknown } };
+	try {
+		snapshot = JSON.parse(readFileSync(path, "utf-8")) as { config?: LazyConfig; settings?: { packages?: unknown } };
+	} catch (err) {
+		return { ...empty, error: `snapshot unreadable: ${err instanceof Error ? err.message : String(err)}` };
+	}
+	if (!snapshot.config || !Array.isArray(snapshot.config.specs)) {
+		return { ...empty, error: "snapshot has no spec list — was it written by an older version?" };
+	}
+	if (!Array.isArray(snapshot.settings?.packages)) {
+		return { ...empty, error: "snapshot carries no settings.packages — save it again with this version (a spec-only snapshot cannot register its packages)" };
+	}
+
+	const current = loadConfig(agentDir);
+	const settingsPath = getSettingsPath(agentDir);
+	const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+	const backups: string[] = [];
+
+	const currentPackages = ((): unknown[] => {
+		if (!existsSync(settingsPath)) return [];
+		try {
+			const parsed = JSON.parse(readFileSync(settingsPath, "utf-8")) as { packages?: unknown };
+			return Array.isArray(parsed?.packages) ? parsed.packages : [];
+		} catch {
+			return [];
+		}
+	})();
+
+	const sourceOf = (entry: unknown): string | null => {
+		const s = typeof entry === "string" ? entry : (entry as { source?: unknown })?.source;
+		return typeof s === "string" ? s : null;
+	};
+	const nextSources = new Set(snapshot.settings.packages.map(sourceOf).filter((s): s is string => s !== null));
+	const removed = currentPackages
+		.map(sourceOf)
+		.filter((s): s is string => s !== null && !nextSources.has(s));
+	const currentNames = new Set(current.specs.map((s) => s.name));
+	const added = snapshot.config.specs.map((s) => s.name).filter((n) => !currentNames.has(n));
+
+	try {
+		if (existsSync(getLazyConfigPath(agentDir))) {
+			const b = `${getLazyConfigPath(agentDir)}.bak.snapshot-${stamp}`;
+			copyFileSync(getLazyConfigPath(agentDir), b);
+			backups.push(b);
+		}
+		if (existsSync(settingsPath)) {
+			const b = `${settingsPath}.bak.snapshot-${stamp}`;
+			copyFileSync(settingsPath, b);
+			backups.push(b);
+		}
+
+		// 1. registration — this is what swaps 1234 out for 5678.
+		let settings: Record<string, unknown> | null = null;
+		if (existsSync(settingsPath)) {
+			const parsed = JSON.parse(readFileSync(settingsPath, "utf-8")) as Record<string, unknown>;
+			if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) settings = parsed;
+		}
+		if (settings) {
+			settings.packages = snapshot.settings.packages;
+			atomicWriteJson(settingsPath, settings);
+		}
+
+		// 2. catalog
+		saveConfig(snapshot.config, agentDir);
+
+		// 3. land the modes — without this the specs exist but nothing defers.
+		const migration = migrateSettings(agentDir);
+		return {
+			ok: migration.ok,
+			specCount: snapshot.config.specs.length,
+			packageCount: snapshot.settings.packages.length,
+			added,
+			removed,
+			migrated: migration.changed.length,
+			backups,
+			...(migration.ok ? {} : { error: `migrate failed: ${migration.error}` }),
+		};
+	} catch (err) {
+		return { ...empty, backups, error: err instanceof Error ? err.message : String(err) };
+	}
+}
+
+function snapshotDelete(agentDir: string, name: string): { ok: boolean; error?: string } {
+	const path = snapshotPathFor(agentDir, name);
+	if (!path || !existsSync(path)) return { ok: false, error: `no saved snapshot named "${name}"` };
+	try {
+		unlinkSync(path);
+		return { ok: true };
+	} catch (err) {
+		return { ok: false, error: err instanceof Error ? err.message : String(err) };
+	}
+}
+
+function snapshotList(agentDir: string): Array<{ name: string; specCount: number; packageCount: number; savedAt: string }> {
+	const dir = snapshotDir(agentDir);
+	if (!existsSync(dir)) return [];
+	try {
+		return readdirSync(dir)
+			.filter((f) => f.endsWith(".json") && !f.includes(".bak-"))
+			.map((f) => {
+				try {
+					const parsed = JSON.parse(readFileSync(join(dir, f), "utf-8")) as { savedAt?: string; config?: { specs?: unknown[] }; settings?: { packages?: unknown[] } };
+					return {
+						name: f.replace(/\.json$/, ""),
+						specCount: parsed.config?.specs?.length ?? 0,
+						packageCount: parsed.settings?.packages?.length ?? 0,
+						savedAt: parsed.savedAt ?? "unknown",
+					};
+				} catch {
+					return { name: f.replace(/\.json$/, ""), specCount: 0, packageCount: 0, savedAt: "unreadable" };
+				}
+			})
+			.sort((a, b) => (a.savedAt < b.savedAt ? 1 : -1));
+	} catch {
+		return [];
+	}
+}
+
+interface EnableResult {
+	ok: boolean;
+	restoredSpec?: boolean;
+	restoredEntry?: boolean;
+	noop?: boolean;
+	mode?: string;
+	specFrom?: string;
+	entryFrom?: string;
+	migrated?: number;
+	migrateSkipped?: number;
+	migrateError?: string;
+	backups: string[];
+	error?: string;
+}
+
+interface DisableResult {
+	ok: boolean;
+	noop?: boolean;
+	droppedFromSettings: boolean;
+	migrated?: number;
+	migrateSkipped?: number;
+	backups: string[];
+	error?: string;
+}
+
+/**
+ * Disable a package: drop it from the lazy catalog and from settings.packages.
+ *
+ * Named "disable" rather than remove/uninstall on purpose. `extensions: []` in
+ * settings.json does NOT uninstall anything — package-manager.js defaults every
+ * entry to `enabled = true` and applies `+`/`-` overrides on top, so an empty list
+ * simply yields no enabled files. The npm package stays in node_modules either
+ * way. This command therefore removes the package from the *loading scheme*
+ * (catalog spec + settings registration); it never touches node_modules, and
+ * `pi install npm:<name>` brings it back with one command.
+ *
+ * That is deliberately not a fourth `lazy` mode. The three modes decide *when* a
+ * catalog member loads; disabling decides whether it is a member at all. A spec
+ * whose source is gone from settings is inert — lazy never activates a package pi
+ * has not registered — so both halves must go or the spec lingers as a permanently
+ * failing entry in `/lazy list`.
+ *
+ * Both files are backed up before the first write; `/lazy restore` undoes it.
+ * Nothing is reloaded automatically — pi's own `/reload` is the only point at
+ * which the change takes effect, because a loaded extension factory has no
+ * inverse operation.
+ */
+/**
+ * Catalog members that `/lazy disable <name>` could remove.
+ *
+ * Read straight from lazy.json rather than the in-session table: the runtime
+ * view already dropped anything not currently loaded, which is exactly the set
+ * the user may want to disable.
+ */
+interface RescueResult {
+	ok: boolean;
+	handedBack: string[];
+	keptOverrides: string[];
+	specsCleared: number;
+	backups: string[];
+	error?: string;
+}
+
+/**
+ * Hand every package back to native Pi: no deferred loading, no lazy catalog.
+ *
+ * The escape hatch for a config that has been broken badly enough that the other
+ * subcommands are unusable. Two halves, both required:
+ *
+ * 1. settings.packages — remove the `extensions: []` filter lazy wrote, which
+ *    restores the plain string form and makes Pi instantiate each package's
+ *    extension factory at startup again. Entries carrying `+`/`-` filters are
+ *    left alone: those state an explicit per-entrypoint intent that predates
+ *    lazy (extmgr wrote them), and stripping them would change behaviour the
+ *    operator did not ask to change.
+ * 2. lazy.json — empty the spec list. Deleting the file is not an option:
+ *    loadConfig() regenerates a built-in catalog when it is missing, so removing
+ *    it would hand control straight back to the extension on next start. An
+ *    empty-but-present catalog means migrate has nothing to act on.
+ *
+ * Backups are written before the first write; restoring them is the way back.
+ */
+function rescueNative(agentDir: string): RescueResult {
+	const configPath = getLazyConfigPath(agentDir);
+	const settingsPath = getSettingsPath(agentDir);
+	const config = loadConfig(agentDir);
+	const specsCleared = config.specs.length;
+
+	const handedBack: string[] = [];
+	const keptOverrides: string[] = [];
+
+	let settings: Record<string, unknown> | null = null;
+	if (existsSync(settingsPath)) {
+		try {
+			const parsed = JSON.parse(readFileSync(settingsPath, "utf-8")) as unknown;
+			if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) settings = parsed as Record<string, unknown>;
+		} catch (err) {
+			return { ok: false, handedBack, keptOverrides, specsCleared, backups: [], error: `settings.json unreadable: ${err instanceof Error ? err.message : String(err)}` };
+		}
+	}
+
+	const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+	const backups: string[] = [];
+	if (existsSync(configPath)) {
+		const b = `${configPath}.bak.rescue-${stamp}`;
+		copyFileSync(configPath, b);
+		backups.push(b);
+	}
+	if (settings && existsSync(settingsPath)) {
+		const b = `${settingsPath}.bak.rescue-${stamp}`;
+		copyFileSync(settingsPath, b);
+		backups.push(b);
+	}
+
+	try {
+		if (settings && Array.isArray(settings.packages)) {
+			settings.packages = (settings.packages as unknown[]).map((entry) => {
+				if (!entry || typeof entry !== "object") return entry;
+				const obj = entry as Record<string, unknown>;
+				if (!(Array.isArray(obj.extensions) && obj.extensions.length === 0)) {
+					const src = typeof obj.source === "string" ? obj.source : null;
+					if (src && Array.isArray(obj.extensions)) keptOverrides.push(src);
+					return entry;
+				}
+				const { extensions, ...rest } = obj;
+				if (typeof rest.source === "string") {
+					handedBack.push(rest.source);
+					return rest.source;
+				}
+				handedBack.push("(unnamed)");
+				return rest;
+			});
+			atomicWriteJson(settingsPath, settings);
+		}
+		saveConfig({ ...config, specs: [] }, agentDir);
+	} catch (err) {
+		return { ok: false, handedBack, keptOverrides, specsCleared, backups, error: err instanceof Error ? err.message : String(err) };
+	}
+
+	return { ok: true, handedBack, keptOverrides, specsCleared, backups };
+}
+
+/**
+ * Package roster, refreshed by `/lazy init` and read by `/lazy disable` and
+ * `/lazy enable`.
+ *
+ * Both subcommands need the same full picture, so it is computed once per init
+ * and stored on disk: reading and re-parsing both config files on every bare
+ * invocation would repeat the same work for no benefit, and the answer only
+ * changes when the set of installed packages does — which is what init is for.
+ *
+ * `disable` may be given any catalog member; `enable` may be given any entry in
+ * `all`, because the two lists are simply the whole roster. Re-disabling an
+ * already-disabled package or re-enabling an already-enabled one is reported as
+ * such rather than treated as an error: the operator asked, and the state they
+ * wanted is already what they have.
+ */
+const ROSTER_PATH = "lazy-roster.json";
+
+interface RosterEntry {
+	name: string;
+	source: string;
+	mode: string;
+}
+
+interface Roster {
+	version: 1;
+	generatedAt: string;
+	all: RosterEntry[];
+}
+
+function rosterPath(agentDir: string): string {
+	return join(agentDir, ROSTER_PATH);
+}
+
+/** Read the stored roster, recomputing it if it was never written. */
+function loadRoster(agentDir: string): Roster {
+	const path = rosterPath(agentDir);
+	if (existsSync(path)) {
+		try {
+			const parsed = JSON.parse(readFileSync(path, "utf-8")) as Roster;
+			if (parsed && Array.isArray(parsed.all)) return parsed;
+		} catch {
+			// fall through to a fresh scan
+		}
+	}
+	return buildRoster(agentDir);
+}
+
+/**
+ * Every installed package, whatever state lazy holds it in.
+ *
+ * Union of the catalog (packages lazy manages) and settings.packages (packages
+ * pi registers), keyed by `source` so a package appearing in both is listed once.
+ */
+function buildRoster(agentDir: string): Roster {
+	const config = loadConfig(agentDir);
+	const seen = new Map<string, RosterEntry>();
+
+	for (const spec of config.specs) {
+		seen.set(normalizeSourceKey(spec.source), {
+			name: spec.name,
+			source: spec.source,
+			mode: typeof spec.lazy === "boolean" ? (spec.lazy ? "lazy" : "eager") : String(spec.lazy),
+		});
+	}
+
+	const settingsPath = getSettingsPath(agentDir);
+	if (existsSync(settingsPath)) {
+		try {
+			const parsed = JSON.parse(readFileSync(settingsPath, "utf-8")) as { packages?: unknown[] };
+			for (const entry of parsed.packages ?? []) {
+				const src = typeof entry === "string" ? entry : (entry as { source?: unknown })?.source;
+				if (typeof src !== "string" || seen.has(normalizeSourceKey(src))) continue;
+				seen.set(normalizeSourceKey(src), {
+					name: (npmPackageName(src) ?? src).split("/").pop() ?? src,
+					source: src,
+					mode: typeof entry === "string" ? "eager" : "custom",
+				});
+			}
+		} catch {
+			// settings unreadable — the catalog half is still worth showing
+		}
+	}
+
+	return { version: 1, generatedAt: new Date().toISOString(), all: [...seen.values()] };
+}
+
+/** Recompute and persist the roster. Called by `/lazy init`. */
+function refreshRoster(agentDir: string): Roster {
+	const roster = buildRoster(agentDir);
+	try {
+		atomicWriteJson(rosterPath(agentDir), roster);
+	} catch (err) {
+		console.error(`[pi-lazy] failed to write roster: ${err instanceof Error ? err.message : String(err)}`);
+	}
+	return roster;
+}
+
+function formatRoster(roster: Roster, verb: string): string {
+	if (roster.all.length === 0) return "no packages recorded — run /lazy init first";
+	return [
+		`packages for /lazy ${verb} (${roster.all.length}, from lazy-roster.json):`,
+		...roster.all.map((e) => `  ${e.name}  [${e.mode}]  ${e.source}`),
+		"",
+		`usage: /lazy ${verb} <name>`,
+	].join("\n");
+}
+
+/**
+ * Re-enable a package previously removed by `/lazy disable`.
+ *
+ * The mirror image of disablePackage: put the settings entry and the catalog spec
+ * back. The spec's original mode (lazy / after-start / eager) comes from the most
+ * recent `*.bak.disable-*` snapshot that still contains it, so a disabled package
+ * comes back the way it left.
+ *
+ * node_modules is never touched in either direction — `pi install npm:<name>`
+ * stays the way to add or remove the package itself.
+ */
+function enablePackage(agentDir: string, name: string): EnableResult {
+	const configPath = getLazyConfigPath(agentDir);
+	const settingsPath = getSettingsPath(agentDir);
+	const config = loadConfig(agentDir);
+
+	// Already in the catalog: not an error. The roster is the whole package list
+	// for both verbs, so re-enabling an enabled package is a request the operator
+	// is entitled to make; the state they asked for is already what they have.
+	// Report it so the answer is still explicit rather than silently re-written.
+	if (config.specs.some((s) => s.name === name || sourcesMatch(s.source, name))) {
+		const existing = config.specs.find((s) => s.name === name || sourcesMatch(s.source, name));
+		return {
+			ok: true,
+			restoredSpec: false,
+			restoredEntry: false,
+			mode: existing ? (typeof existing.lazy === "boolean" ? (existing.lazy ? "lazy" : "eager") : String(existing.lazy)) : undefined,
+			backups: [],
+			noop: true,
+		};
+	}
+
+	// Recover the original spec from the newest disable backup that has one.
+	let recovered: LazySpec | null = null;
+	let specBackup: string | null = null;
+	if (existsSync(configPath)) {
+		const dir = dirname(configPath);
+		const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+		let candidates: string[] = [];
+		try {
+			candidates = readdirSync(dir)
+				.filter((f) => f.startsWith(`${basename(configPath)}.bak.disable-`))
+				.sort()
+				.reverse();
+		} catch {
+			candidates = [];
+		}
+		for (const file of candidates) {
+			try {
+				const snap = JSON.parse(readFileSync(join(dir, file), "utf-8")) as LazyConfig;
+				const hit = snap.specs?.find((s) => s.name === name || sourcesMatch(s.source, name));
+				if (hit) {
+					recovered = hit;
+					specBackup = join(dir, file);
+					break;
+				}
+			} catch {
+				// skip unreadable snapshot
+			}
+		}
+	}
+
+	let settings: Record<string, unknown> | null = null;
+	if (existsSync(settingsPath)) {
+		try {
+			const parsed = JSON.parse(readFileSync(settingsPath, "utf-8")) as unknown;
+			if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) settings = parsed as Record<string, unknown>;
+		} catch (err) {
+			return { ok: false, restoredSpec: false, backups: [], error: `settings.json unreadable: ${err instanceof Error ? err.message : String(err)}` };
+		}
+	}
+
+	// Recover the settings entry too, from the paired settings backup.
+	const packages = settings && Array.isArray(settings.packages) ? [...(settings.packages as unknown[])] : [];
+	let entry: unknown = null;
+	let settingsBackup: string | null = null;
+	if (existsSync(settingsPath)) {
+		const dir = dirname(settingsPath);
+		const base = basename(settingsPath);
+		let candidates: string[] = [];
+		try {
+			candidates = readdirSync(dir)
+				.filter((f) => f.startsWith(`${base}.bak.disable-`))
+				.sort()
+				.reverse();
+		} catch {
+			candidates = [];
+		}
+		for (const file of candidates) {
+			try {
+				const snap = JSON.parse(readFileSync(join(dir, file), "utf-8")) as { packages?: unknown[] };
+				const hit = (snap.packages ?? []).find((p) => {
+					const src = typeof p === "string" ? p : (p as { source?: unknown })?.source;
+					return typeof src === "string" && (sourcesMatch(src, name) || sourcesMatch(src, recovered?.source ?? name));
+				});
+				if (hit) {
+					entry = hit;
+					settingsBackup = join(dir, file);
+					break;
+				}
+			} catch {
+				// skip unreadable snapshot
+			}
+		}
+	}
+
+	const source = recovered?.source ?? (typeof entry === "string" ? entry : (entry as { source?: string })?.source) ?? name;
+	if (!recovered && !entry) {
+		return {
+			ok: false,
+			restoredSpec: false,
+			backups: [],
+			error: `no record of "${name}" in any *.bak.disable-* snapshot — re-add the spec to lazy.json by hand`,
+		};
+	}
+
+	const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+	const backups: string[] = [];
+	if (existsSync(configPath)) {
+		const b = `${configPath}.bak.enable-${stamp}`;
+		copyFileSync(configPath, b);
+		backups.push(b);
+	}
+	if (existsSync(settingsPath)) {
+		const b = `${settingsPath}.bak.enable-${stamp}`;
+		copyFileSync(settingsPath, b);
+		backups.push(b);
+	}
+
+	try {
+		if (recovered) {
+			const next: LazyConfig = { ...config, specs: [...config.specs, recovered] };
+			saveConfig(next, agentDir);
+		}
+		if (settings && entry && !packages.some((p) => {
+			const src = typeof p === "string" ? p : (p as { source?: unknown })?.source;
+			return typeof src === "string" && sourcesMatch(src, source);
+		})) {
+			settings.packages = [...packages, entry];
+			atomicWriteJson(settingsPath, settings);
+		}
+	} catch (err) {
+		return { ok: false, restoredSpec: false, backups, error: err instanceof Error ? err.message : String(err) };
+	}
+
+	const migration = migrateSettings(agentDir);
+
+	return {
+		ok: true,
+		restoredSpec: recovered !== null,
+		restoredEntry: entry !== null,
+		mode: recovered ? (typeof recovered.lazy === "boolean" ? (recovered.lazy ? "lazy" : "eager") : String(recovered.lazy)) : undefined,
+		specFrom: specBackup ?? undefined,
+		entryFrom: settingsBackup ?? undefined,
+		migrated: migration.ok ? migration.changed.length : 0,
+		migrateSkipped: migration.ok ? migration.skipped.length : 0,
+		migrateError: migration.ok ? undefined : migration.error,
+		backups,
+	};
+}
+
+function disablePackage(agentDir: string, name: string): DisableResult {
+	const configPath = getLazyConfigPath(agentDir);
+	const settingsPath = getSettingsPath(agentDir);
+	const config = loadConfig(agentDir);
+
+	const spec = config.specs.find((s) => s.name === name)
+		?? config.specs.find((s) => sourcesMatch(s.source, name))
+		?? config.specs.find((s) => s.name.toLowerCase().includes(name.toLowerCase()));
+	if (!spec) {
+		// Not in the catalog: already disabled, or simply a name that was never
+		// tracked. Either way the requested state already holds. The roster is the
+		// full package list for both verbs, so this is a normal answer, not a fault.
+		return { ok: true, noop: true, droppedFromSettings: false, backups: [] };
+	}
+
+	let settings: Record<string, unknown> | null = null;
+	if (existsSync(settingsPath)) {
+		try {
+			const parsed = JSON.parse(readFileSync(settingsPath, "utf-8")) as unknown;
+			if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) settings = parsed as Record<string, unknown>;
+		} catch (err) {
+			return { ok: false, droppedFromSettings: false, backups: [], error: `settings.json unreadable: ${err instanceof Error ? err.message : String(err)}` };
+		}
+	}
+
+	const packages = settings && Array.isArray(settings.packages) ? [...(settings.packages as unknown[])] : [];
+	const keep = packages.filter((entry) => {
+		const src = typeof entry === "string" ? entry : (entry as { source?: unknown })?.source;
+		return typeof src !== "string" || !sourcesMatch(src, spec.source);
+	});
+	const droppedFromSettings = keep.length !== packages.length;
+
+	const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+	const backups: string[] = [];
+
+	if (existsSync(configPath)) {
+		const backup = `${configPath}.bak.disable-${stamp}`;
+		copyFileSync(configPath, backup);
+		backups.push(backup);
+	}
+	if (droppedFromSettings && settings && existsSync(settingsPath)) {
+		const backup = `${settingsPath}.bak.disable-${stamp}`;
+		copyFileSync(settingsPath, backup);
+		backups.push(backup);
+	}
+
+	try {
+		const next: LazyConfig = { ...config, specs: config.specs.filter((s) => s !== spec) };
+		saveConfig(next, agentDir);
+		if (settings && droppedFromSettings) {
+			settings.packages = keep;
+			atomicWriteJson(settingsPath, settings);
+		}
+		// The package is out of both files, so migrate has no entry left to translate —
+		// it runs to confirm nothing else in the catalog drifted, not to change this
+		// package. Kept so every mutating subcommand lands settings and lazy.json in
+		// the same state, whatever the operator changed before running it.
+	} catch (err) {
+		return { ok: false, droppedFromSettings, backups, error: err instanceof Error ? err.message : String(err) };
+	}
+
+	const migration = migrateSettings(agentDir);
+	return {
+		ok: true,
+		droppedFromSettings,
+		migrated: migration.ok ? migration.changed.length : 0,
+		migrateSkipped: migration.ok ? migration.skipped.length : 0,
+		backups,
+	};
+}
+
 function refreshStatus(pi: ExtensionAPI, rt: Runtime, ctx?: ExtensionContext) {
 	rt.status = formatStatus(rt);
 	globalThis.__piLazyStatus = rt.status;
@@ -272,7 +974,10 @@ function runDoctor(agentDir: string, rt: Runtime) {
     }
     const entry = packages[idx[0]];
     if (typeof entry === "string") {
-      if (managed) lines.push(`! ${spec.name}: 纯字符串 = 未 migrate，lazy=${JSON.stringify(spec.lazy)} 未生效 → 跑 /lazy migrate`);
+      if (managed)
+        lines.push(
+          `· ${spec.name}: 纯字符串 = pi 启动即加载（现在就是可用状态）。lazy=${JSON.stringify(spec.lazy)} 尚未接管；跑 /lazy migrate 会改写成 [] 交给 lazy，届时要等 after-start/触发才出现`,
+        );
       continue;
     }
     const filters = Array.isArray(entry.extensions) ? entry.extensions : [];
@@ -284,14 +989,32 @@ function runDoctor(agentDir: string, rt: Runtime) {
     } else {
       lines.push(`! ${spec.name}: 带放行标记 ${JSON.stringify(filters)} → 下次 /lazy migrate 会收回为 []`);
     }
-    const triggers = (spec.cmd ?? []).length + (spec.tools ?? []).length + (spec.keywords ?? []).length + (spec.event ?? []).length;
+    const triggers = (spec.cmd ?? []).length + (spec.tools ?? []).length + (spec.keys ?? []).length + (spec.keywords ?? []).length + (spec.event ?? []).length;
     if (spec.lazy === true && triggers === 0) {
       lines.push(`   ↳ 无触发入口（lazy=true）：只能 /lazy load ${spec.name}（或模型调 lazy_load）`);
     }
   }
   const specSources = rt.config.specs.map((s) => s.source);
-  const outside = packages.map(sourceOf).filter((src: string) => src && !specSources.some((s) => sourcesMatch(src, s)));
-  if (outside.length) lines.push(`- 未纳入 lazy（启动即加载）: ${outside.join(", ")}`);
+  const outside = packages.filter((p: unknown) => {
+    const src = sourceOf(p);
+    return !!src && !specSources.some((s) => sourcesMatch(src, s));
+  });
+  const nobodyLoads: string[] = [];
+  const eagerOutside: string[] = [];
+  for (const p of outside) {
+    const src = sourceOf(p);
+    const ext = typeof p === "object" && p !== null ? (p as { extensions?: unknown }).extensions : undefined;
+    // settings 里 extensions:[] 在 pi 眼里 = 这个包的所有扩展都禁用。
+    // 如果 lazy.json 里又没有它，就没有任何一方会加载它 → 命令/工具都不会注册。
+    if (Array.isArray(ext) && ext.length === 0) nobodyLoads.push(src);
+    else eagerOutside.push(src);
+  }
+  if (nobodyLoads.length) {
+    lines.push(`X 没人加载（settings 是 extensions:[] 但 lazy.json 里没有它 → pi 不加载、lazy 也不管）: ${nobodyLoads.join(", ")}`);
+    lines.push(`   ↳ 后果：这些包的命令/工具都不会注册（pi-extmgr 整个失效就是这条）`);
+    lines.push(`   ↳ 修法二选一：① settings 里改回普通字符串，让 pi 启动即加载；② 加进 lazy.json 并写对触发名`);
+  }
+  if (eagerOutside.length) lines.push(`- 未纳入 lazy（启动即加载）: ${eagerOutside.join(", ")}`);
   if (rt.entries && typeof rt.entries.values === "function") {
     const all = [...rt.entries.values()];
     for (const e of all) {
@@ -305,6 +1028,25 @@ function runDoctor(agentDir: string, rt: Runtime) {
     }
     const loaded = all.filter((e) => e.state === "loaded").length;
     lines.push(`· 运行态: ${loaded} loaded / ${all.filter((e) => e.state === "pending").length} pending / ${all.filter((e) => e.state === "eager").length} eager${rt.afterStartQueued ? " (after-start 队列进行中)" : ""}`);
+  }
+  // pi-extmgr 兼容补丁：重装/更新 pi-extmgr 会被上游源码冲掉
+  const extmgrFile = join(agentDir, "npm", "node_modules", "pi-extmgr", "src", "packages", "extensions.ts");
+  if (rt.config.managerCompat !== true) {
+    lines.push(`- extmgr 兼容补丁: 关闭（lazy.json 里 managerCompat 不是 true）→ 面板会把懒加载包显示成 Disabled`);
+  } else if (!existsSync(extmgrFile)) {
+    lines.push(`· extmgr 兼容补丁: 未安装 pi-extmgr，跳过`);
+  } else {
+    let patched = false;
+    try {
+      patched = readFileSync(extmgrFile, "utf-8").includes("__piLazyManagedSources");
+    } catch {
+      /* ignore */
+    }
+    lines.push(
+      patched
+        ? `· extmgr 兼容补丁: 已就位（重装/更新 pi-extmgr 会冲掉；重启 pi 或再跑一次 /lazy doctor 会自动补回）`
+        : `X extmgr 兼容补丁: 曾缺失，本次已自动补回 → 需重启 pi 才生效（面板模块一旦加载就缓存到进程结束）`,
+    );
   }
   return lines.length ? lines : ["clean: 未发现异常"];
 }
@@ -912,12 +1654,31 @@ export function createPiLazy(pi: ExtensionAPI, agentDir = getAgentDir()) {
 	});
 
 	pi.registerCommand("lazy", {
-		description: "LazyVim-style extension manager (list|load|migrate|auto|init|scan|status|doctor)",
+		description: "LazyVim-style extension manager (list|load|disable|enable|rescue|snapshot|restore|migrate|auto|init|scan|status|doctor)",
 		getArgumentCompletions: (prefix) => {
-			const sub = ["status", "list", "load", "migrate", "auto", "init", "scan", "config", "profile", "doctor"];
-			const names = [...rt.entries.keys()].map((n) => `load ${n}`);
-			const items = [...sub, ...names, "auto on", "auto off"].map((v) => ({ value: v, label: v }));
-			const filtered = items.filter((i) => i.value.startsWith(prefix) || i.value.includes(prefix));
+			const sub = ["status", "list", "load", "migrate", "auto", "init", "scan", "disable", "enable", "rescue", "restore", "snapshot", "config", "profile", "doctor"];
+			const items = [...sub, "auto on", "auto off"];
+
+			// `/lazy load <name>` — the runtime catalog. `load` needs a name the loader
+			// knows, which is the loaded/pending table, not the roster.
+			for (const n of rt.entries.keys()) items.push(`load ${n}`);
+
+			// `/lazy enable|disable <name>` — the roster, so the packages offered while
+			// typing are the same set the command accepts. Reading the stored file keeps
+			// this synchronous; without it the roster is rebuilt from both configs on
+			// every keystroke.
+			const roster = loadRoster(agentDir);
+			for (const e of roster.all) {
+				items.push(`enable ${e.name}`, `disable ${e.name}`);
+			}
+
+			// `/lazy restore <name>` — a snapshot name, not a package name.
+			for (const s of snapshotList(agentDir)) {
+				items.push(`restore ${s.name}`, `snapshot delete ${s.name}`);
+			}
+
+			const mapped = items.map((v) => ({ value: v, label: v }));
+			const filtered = mapped.filter((i) => i.value.startsWith(prefix) || i.value.includes(prefix));
 			return filtered.length ? filtered : null;
 		},
 		handler: async (args, ctx) => {
@@ -980,6 +1741,7 @@ export function createPiLazy(pi: ExtensionAPI, agentDir = getAgentDir()) {
 				try {
 					const scanLines = scanIntoConfig(pi, rt, ctx, agentDir);
 					const result = migrateSettings(agentDir);
+					const roster = refreshRoster(agentDir);
 					rt.restartRequired = true;
 
 					const lines: string[] = [...scanLines, "", "── migrate ──"];
@@ -997,6 +1759,7 @@ export function createPiLazy(pi: ExtensionAPI, agentDir = getAgentDir()) {
 						}
 						lines.push("Reload or restart Pi to apply it.");
 					}
+					lines.push("", `── roster ──`, `${roster.all.length} packages recorded for /lazy disable and /lazy enable → ${rosterPath(agentDir)}`);
 					ctx.ui.notify(lines.join("\n"), result.ok ? "info" : "warning");
 				} catch (err) {
 					ctx.ui.notify(`failed to initialize config: ${err instanceof Error ? err.message : String(err)}`, "error");
@@ -1044,7 +1807,170 @@ export function createPiLazy(pi: ExtensionAPI, agentDir = getAgentDir()) {
 				return;
 			}
 
+
+			if (sub === "snapshot" || sub === "snap") {
+				const snapshotName = rest.join(" ").trim();
+				if (snapshotName.toLowerCase() === "delete") {
+					const target = rest.slice(1).join(" ").trim();
+					if (!target) {
+						ctx.ui.notify("usage: /lazy snapshot delete <name>", "warning");
+						return;
+					}
+					const deleted = snapshotDelete(agentDir, target);
+					if (!deleted.ok) {
+						ctx.ui.notify(`snapshot delete failed: ${deleted.error}`, "error");
+						return;
+					}
+					ctx.ui.notify(`deleted snapshot "${target}"`, "info");
+					return;
+				}
+				if (!snapshotName) {
+					// Bare `/lazy snapshot` lists what is saved — the only sensible
+					// reading now that save/restore are flat subcommands.
+					const listed = snapshotList(agentDir);
+					ctx.ui.notify(
+						listed.length === 0
+							? `no snapshots saved — create one with /lazy snapshot <name>\n(storage: ${snapshotDir(agentDir)})`
+							: ["saved snapshots:", ...listed.map((s) => `  ${s.name}  (${s.specCount} specs, ${s.packageCount} packages, ${s.savedAt})`), "", `storage: ${snapshotDir(agentDir)}`].join("\n"),
+						"info",
+					);
+					return;
+				}
+				const result = snapshotSave(agentDir, snapshotName);
+				if (!result.ok) {
+					ctx.ui.notify(`snapshot failed: ${result.error}`, "error");
+					return;
+				}
+				ctx.ui.notify(
+					[
+						`saved snapshot "${snapshotName}" — ${result.specCount} specs + ${result.packageCount} settings packages`,
+						`  → ${result.path}`,
+						result.overwrote ? `  overwrote previous (kept as ${result.previous})` : "",
+					].filter(Boolean).join("\n"),
+					"info",
+				);
+				return;
+			}
+
+			if (sub === "restore") {
+				const snapshotName = rest.join(" ").trim();
+				if (!snapshotName) {
+					ctx.ui.notify("usage: /lazy restore <name>   ·   /lazy snapshot   to list saved snapshots", "warning");
+					return;
+				}
+				const result = snapshotRestore(agentDir, snapshotName);
+				if (!result.ok) {
+					ctx.ui.notify(`restore failed: ${result.error}`, "error");
+					return;
+				}
+				rt.config = loadConfig(agentDir);
+				refreshStatus(pi, rt, ctx);
+				ctx.ui.notify(
+					[
+						`restored snapshot "${snapshotName}" — scheme replaced (not merged)`,
+						`  lazy.json:     ${result.specCount} specs`,
+						`  settings.json: ${result.packageCount} packages registered`,
+						`  migrate:       ${result.migrated} entr${result.migrated === 1 ? "y" : "ies"} updated`,
+						result.added.length ? `  new specs:      ${result.added.join(", ")}` : "",
+						result.removed.length ? `  no longer registered: ${result.removed.join(", ")}` : "",
+						"  node_modules untouched — `pi install npm:<name>` brings any of them back",
+						...result.backups.map((b) => `  backup: ${b}`),
+						"Not in effect yet — run /reload for the change to take effect.",
+					].filter(Boolean).join("\n"),
+					"info",
+				);
+				return;
+			}
+
+			if (sub === "rescue" || sub === "panic") {
+				const result = rescueNative(agentDir);
+				if (!result.ok) {
+					ctx.ui.notify(`rescue failed: ${result.error}`, "error");
+					return;
+				}
+				refreshStatus(pi, rt, ctx);
+
+				const lines = ["rescued — every package handed back to native Pi"];
+				lines.push(`  lazy.json: ${result.specsCleared} spec${result.specsCleared === 1 ? "" : "s"} cleared (file kept: deleting it would let lazy rebuild its catalog)`);
+				if (result.handedBack.length > 0) {
+					lines.push(`  settings.json: ${result.handedBack.length} package${result.handedBack.length === 1 ? "" : "s"} restored to eager:`);
+					for (const s of result.handedBack) lines.push(`    ${s}`);
+				} else {
+					lines.push("  settings.json: no lazy-written filters found — nothing to restore");
+				}
+				if (result.keptOverrides.length > 0) {
+					lines.push("  kept explicit entry filters (not written by lazy):");
+					for (const s of result.keptOverrides) lines.push(`    ${s}`);
+				}
+				for (const p of result.backups) lines.push(`  backup: ${p}`);
+				lines.push("Not in effect yet — run /reload for the change to take effect.");
+				lines.push("To come back: /lazy init (rebuild the catalog) or restore a *.bak.rescue-* file.");
+				ctx.ui.notify(lines.join("\n"), "info");
+				return;
+			}
+
+			if (sub === "enable" || sub === "en") {
+				const name = rest.join(" ").trim();
+				if (!name) {
+					ctx.ui.notify(formatRoster(loadRoster(agentDir), "enable"), "info");
+					return;
+				}
+				const result = enablePackage(agentDir, name);
+				if (!result.ok) {
+					ctx.ui.notify(`enable failed: ${result.error}`, "error");
+					return;
+				}
+				refreshStatus(pi, rt, ctx);
+
+				if (result.noop) {
+					ctx.ui.notify(`enabled ${name} — already in the loading scheme [${result.mode}], nothing to do`, "info");
+					return;
+				}
+				const lines = [`enabled ${name} — back in the loading scheme`];
+				if (result.restoredSpec) lines.push(`  lazy.json: spec restored [${result.mode}]${result.specFrom ? ` from ${basename(result.specFrom)}` : ""}`);
+				if (result.restoredEntry) lines.push(`  settings.json: package entry restored${result.entryFrom ? ` from ${basename(result.entryFrom)}` : ""}`);
+				lines.push(`  migrate: ${(result.migrated ?? 0) > 0 ? `${result.migrated} entr${result.migrated === 1 ? "y" : "ies"} updated` : "nothing to change"}`);
+				if (result.migrateError) lines.push(`  migrate error: ${result.migrateError}`);
+				lines.push("  node_modules: untouched — `pi install npm:<name>` if the package itself is gone");
+				for (const p of result.backups) lines.push(`  backup: ${p}`);
+				lines.push("Not in effect yet — run /reload for the change to take effect.");
+				ctx.ui.notify(lines.join("\n"), "info");
+				return;
+			}
+
+			if (sub === "disable" || sub === "d") {
+				const name = rest.join(" ").trim();
+				if (!name) {
+					ctx.ui.notify(formatRoster(loadRoster(agentDir), "disable"), "info");
+					return;
+				}
+				const result = disablePackage(agentDir, name);
+				if (!result.ok) {
+					ctx.ui.notify(`disable failed: ${result.error}`, "error");
+					return;
+				}
+				refreshStatus(pi, rt, ctx);
+
+				if (result.noop) {
+					ctx.ui.notify(`disabled ${name} — already out of the loading scheme, nothing to do`, "info");
+					return;
+				}
+				const lines = [`disabled ${name} — removed from the loading scheme`];
+				if (result.droppedFromSettings) lines.push("  settings.json: package entry removed");
+				else lines.push("  settings.json: no matching package entry (spec only)");
+				lines.push("  lazy.json: spec removed");
+				lines.push(`  migrate: ${(result.migrated ?? 0) > 0 ? `${result.migrated} entr${result.migrated === 1 ? "y" : "ies"} updated` : "nothing to change (this package is out of settings; migrate only confirms the rest of the catalog)"}`);
+				lines.push("  node_modules: untouched — `pi install npm:<name>` brings it back");
+				for (const p of result.backups) lines.push(`  backup: ${p}`);
+				lines.push("Not in effect yet — run /reload for the change to take effect.");
+				ctx.ui.notify(lines.join("\n"), "info");
+				return;
+			}
+
+
 			if (sub === "doctor") {
+				// 一键：顺手把 pi-extmgr 的兼容补丁补回（幂等，已打过则直接返回）
+				ensureManagerCompat(agentDir, rt);
 				ctx.ui.notify(runDoctor(agentDir, rt).join("\n"), "info");
 				return;
 			}
@@ -1073,7 +1999,7 @@ export function createPiLazy(pi: ExtensionAPI, agentDir = getAgentDir()) {
 				return;
 			}
 
-			ctx.ui.notify("usage: /lazy [status|list|profile|load <name>|init|scan|migrate|auto on|off|config]", "warning");
+			ctx.ui.notify("usage: /lazy [status|list|profile|load <name>|disable <name>|enable <name>|rescue|snapshot <name>|restore <name>|init|scan|migrate|auto on|off|config]", "warning");
 		},
 	});
 
