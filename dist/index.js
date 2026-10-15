@@ -1239,7 +1239,7 @@ backup: ${backup}` : ""}`);
     lines.push("left eager (lazy:false) \u2014 set lazy:true or after-start by hand to defer them.");
   }
   if (settingsWarning) lines.push(settingsWarning);
-  return { lines, added: [...discovered.map((s) => s.name), ...localExts.map((e) => e.spec.name)] };
+  return lines;
 }
 function snapshotDir(agentDir) {
   return join4(agentDir, "lazy-snapshots");
@@ -1389,11 +1389,10 @@ function snapshotList(agentDir) {
     return [];
   }
 }
-function mergeLiveIntoSnapshots(agentDir, only) {
+function mergeLiveIntoSnapshots(agentDir) {
   const dir = snapshotDir(agentDir);
   if (!existsSync5(dir)) return { updated: [], added: 0 };
-  const newSpecs = loadConfig(agentDir).specs.filter((s) => only.has(s.name));
-  if (newSpecs.length === 0) return { updated: [], added: 0 };
+  const liveSpecs = loadConfig(agentDir).specs;
   let livePackages = [];
   try {
     const parsed = JSON.parse(readFileSync5(getSettingsPath(agentDir), "utf-8"));
@@ -1405,10 +1404,6 @@ function mergeLiveIntoSnapshots(agentDir, only) {
     const s = typeof e === "string" ? e : e?.source;
     return typeof s === "string" ? s : null;
   };
-  const newPackages = livePackages.filter((e) => {
-    const s = sourceOf(e);
-    return s !== null && newSpecs.some((sp) => sourcesMatch(sp.source, s));
-  });
   const updated = [];
   let added = 0;
   for (const file of readdirSync2(dir).filter((f) => f.endsWith(".json") && !f.includes(".bak-"))) {
@@ -1423,9 +1418,9 @@ function mergeLiveIntoSnapshots(agentDir, only) {
     if (!Array.isArray(snap.settings?.packages)) continue;
     const savedSpecs = snap.config.specs;
     const savedPackages = snap.settings.packages;
-    const missingSpecs = newSpecs.filter((s) => !savedSpecs.some((k) => k.name === s.name || sourcesMatch(k.source, s.source)));
+    const missingSpecs = liveSpecs.filter((s) => !savedSpecs.some((k) => k.name === s.name || sourcesMatch(k.source, s.source)));
     const knownSources = savedPackages.map(sourceOf).filter((s) => s !== null);
-    const missingPackages = newPackages.filter((e) => {
+    const missingPackages = livePackages.filter((e) => {
       const s = sourceOf(e);
       return s !== null && !knownSources.some((k) => sourcesMatch(k, s));
     });
@@ -2418,7 +2413,7 @@ function createPiLazy(pi, agentDir = getAgentDir4()) {
       }
       if (sub === "init") {
         try {
-          const { lines: scanLines, added: addedNames } = scanIntoConfig(pi, rt, ctx, agentDir);
+          const scanLines = scanIntoConfig(pi, rt, ctx, agentDir);
           const result = migrateSettings(agentDir);
           const roster = refreshRoster(agentDir);
           rt.restartRequired = true;
@@ -2438,7 +2433,7 @@ function createPiLazy(pi, agentDir = getAgentDir4()) {
             lines.push("Reload or restart Pi to apply it.");
           }
           lines.push("", `\u2500\u2500 roster \u2500\u2500`, `${roster.all.length} packages recorded for /lazy disable and /lazy enable \u2192 ${rosterPath(agentDir)}`);
-          const synced = mergeLiveIntoSnapshots(agentDir, new Set(addedNames));
+          const synced = mergeLiveIntoSnapshots(agentDir);
           if (synced.error) {
             lines.push("", "\u2500\u2500 snapshots \u2500\u2500", synced.error);
           } else if (synced.updated.length > 0) {

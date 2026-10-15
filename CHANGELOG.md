@@ -24,16 +24,13 @@ How to read this file:
   and the filter is what actually defers the factory. Folders without a usable manifest are skipped
   rather than guessed at — a bare directory contributes nothing, and a spec for it would produce an
   entry that fails to load forever.
-- **`/lazy init` folds newly discovered packages into every saved snapshot.** A snapshot replaces
+- **`/lazy init` brings every saved snapshot up to the live plugin set.** A snapshot replaces
   `settings.packages` wholesale, so a package installed after the snapshot was taken is simply
   absent from it — and restoring that snapshot deregisters the package, which stops loading with no
-  error anywhere. `init` is the command that discovers packages, so it is where this is repaired:
-  after the catalog merge and migrate, each snapshot gains whatever spec or package entry it is
-  missing. Only what *that* `init` discovered is propagated — merging the whole live catalog instead
-  would converge every snapshot onto the current scheme, so a deliberately minimal one would silently
-  grow every package the current one happens to have. Additive only — nothing is ever removed, and
-  existing entries keep their own `extensions` filter form, since that form is the reason the snapshot
-  exists.
+  error anywhere. After the catalog merge and migrate, `init` adds whatever spec or package entry
+  each snapshot is missing. Additive only — a snapshot never loses anything, and entries already in
+  it keep their own `extensions` filter form, since that form is the reason the snapshot exists.
+  Schemes therefore stay in step on which plugins exist and differ on when each one loads.
 - **`/lazy snapshot <name>`** — save the whole loading scheme under a name. A snapshot captures the
   catalog, its global switches, **and** the `settings.json` package list with each entry's
   `extensions` filter form intact. Catalog-only saving was tried first and is not sufficient:

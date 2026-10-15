@@ -143,7 +143,7 @@ function formatStatus(rt: Runtime): string {
 	return parts.join(" ");
 }
 
-function scanIntoConfig(pi: ExtensionAPI, rt: Runtime, ctx: ExtensionContext, agentDir: string): { lines: string[]; added: string[] } {
+function scanIntoConfig(pi: ExtensionAPI, rt: Runtime, ctx: ExtensionContext, agentDir: string): string[] {
 	const currentPath = getLazyConfigPath(agentDir);
 	const hadExisting = existsSync(currentPath);
 	const existingConfig = hadExisting ? loadConfig(agentDir) : defaultConfig();
@@ -223,7 +223,7 @@ function scanIntoConfig(pi: ExtensionAPI, rt: Runtime, ctx: ExtensionContext, ag
 		lines.push("left eager (lazy:false) — set lazy:true or after-start by hand to defer them.");
 	}
 	if (settingsWarning) lines.push(settingsWarning);
-	return { lines, added: [...discovered.map((s) => s.name), ...localExts.map((e) => e.spec.name)] };
+	return lines;
 }
 
 /** Directory holding saved plugin snapshots. */
@@ -457,19 +457,12 @@ function snapshotList(agentDir: string): Array<{ name: string; specCount: number
  * Additive only. Existing entries keep their own filter form — that form is the
  * whole reason the snapshot exists. Runs after migrate, so the package lands in
  * the same resolved shape it has live.
- *
- * `only` is what THIS init discovered, and it is load-bearing: merging the whole
- * live catalog instead would converge every snapshot onto the current scheme, so
- * a deliberately minimal one would silently grow every package the current one
- * happens to have.
  */
-function mergeLiveIntoSnapshots(agentDir: string, only: Set<string>): { updated: string[]; added: number; error?: string } {
+function mergeLiveIntoSnapshots(agentDir: string): { updated: string[]; added: number; error?: string } {
 	const dir = snapshotDir(agentDir);
 	if (!existsSync(dir)) return { updated: [], added: 0 };
 
-	const newSpecs = loadConfig(agentDir).specs.filter((s) => only.has(s.name));
-	if (newSpecs.length === 0) return { updated: [], added: 0 };
-
+	const liveSpecs = loadConfig(agentDir).specs;
 	let livePackages: unknown[] = [];
 	try {
 		const parsed = JSON.parse(readFileSync(getSettingsPath(agentDir), "utf-8")) as { packages?: unknown };
@@ -482,12 +475,6 @@ function mergeLiveIntoSnapshots(agentDir: string, only: Set<string>): { updated:
 		const s = typeof e === "string" ? e : (e as { source?: unknown })?.source;
 		return typeof s === "string" ? s : null;
 	};
-
-	// The live entries belonging to those specs, already in their post-migrate form.
-	const newPackages = livePackages.filter((e) => {
-		const s = sourceOf(e);
-		return s !== null && newSpecs.some((sp) => sourcesMatch(sp.source, s));
-	});
 
 	const updated: string[] = [];
 	let added = 0;
@@ -504,9 +491,9 @@ function mergeLiveIntoSnapshots(agentDir: string, only: Set<string>): { updated:
 
 		const savedSpecs = snap.config.specs;
 		const savedPackages = snap.settings.packages;
-		const missingSpecs = newSpecs.filter((s) => !savedSpecs.some((k) => k.name === s.name || sourcesMatch(k.source, s.source)));
+		const missingSpecs = liveSpecs.filter((s) => !savedSpecs.some((k) => k.name === s.name || sourcesMatch(k.source, s.source)));
 		const knownSources = savedPackages.map(sourceOf).filter((s): s is string => s !== null);
-		const missingPackages = newPackages.filter((e) => {
+		const missingPackages = livePackages.filter((e) => {
 			const s = sourceOf(e);
 			return s !== null && !knownSources.some((k) => sourcesMatch(k, s));
 		});
@@ -1841,7 +1828,7 @@ export function createPiLazy(pi: ExtensionAPI, agentDir = getAgentDir()) {
 				// tuned spec; losing specs made migrate stop managing those packages,
 				// which is how a `/lazy init` could make startup slower.
 				try {
-					const { lines: scanLines, added: addedNames } = scanIntoConfig(pi, rt, ctx, agentDir);
+					const scanLines = scanIntoConfig(pi, rt, ctx, agentDir);
 					const result = migrateSettings(agentDir);
 					const roster = refreshRoster(agentDir);
 					rt.restartRequired = true;
@@ -1867,7 +1854,7 @@ export function createPiLazy(pi: ExtensionAPI, agentDir = getAgentDir()) {
 					// today is missing from every snapshot taken yesterday — and restoring
 					// one silently deregisters it. Fold the new packages in while we are
 					// here, since this is the command that discovered them.
-					const synced = mergeLiveIntoSnapshots(agentDir, new Set(addedNames));
+					const synced = mergeLiveIntoSnapshots(agentDir);
 					if (synced.error) {
 						lines.push("", "── snapshots ──", synced.error);
 					} else if (synced.updated.length > 0) {

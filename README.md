@@ -630,25 +630,22 @@ Because `restore` replaces `settings.packages` wholesale, a package installed *a
 taken is absent from it — and restoring that snapshot silently deregisters the package. Nothing
 errors; the extension just stops loading.
 
-`/lazy init` closes that hole. After it merges a newly discovered package into the live catalog, it
-folds the same spec and package entry into **every** saved snapshot:
+`/lazy init` closes that hole. After the catalog merge and migrate, it brings **every** saved
+snapshot up to the live plugin set — adding whatever spec or package entry each one is missing:
 
 ```
 ── snapshots ──
-updated 2: work (+1 spec, +1 pkg), minimal (+1 spec, +1 pkg)
+updated 3: work (+1 spec, +1 pkg), minimal (+1 spec, +1 pkg), alt (+1 spec, +1 pkg)
 ```
 
-**Only what that `init` actually discovered is propagated** — not the whole live catalog. This is the
-load-bearing part. Merging everything live would converge every snapshot onto the current scheme, so
-a deliberately minimal one would silently grow every package the current one happens to have, and
-running `init` a few times would leave you with several copies of the same scheme.
+The direction is **live → snapshots, and additive only**. A snapshot never loses anything, and
+entries already in it keep their own `extensions` filter form — that form is the reason the snapshot
+exists. It runs after `migrate`, so what lands in the snapshots is the live entry in its resolved
+shape.
 
-The merge is **additive only**: nothing is ever removed from a snapshot, and entries already in it
-keep their own `extensions` filter form — that form is the reason the snapshot exists. It runs after
-`migrate`, so the new package lands in the snapshots in the same resolved shape it has live.
-
-So the sequence is: install the package, run `/lazy init`, and every scheme you switch to from then
-on already knows about it. Schemes that were already missing it stay as they were.
+So the schemes stay in step on *which plugins exist* and differ on *when each one loads*. Note the
+direction: running `init` while a smaller scheme is active does not trim the others, because that
+would delete plugins from a snapshot you saved on purpose.
 
 ### Drop a package from the scheme
 

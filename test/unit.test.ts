@@ -356,7 +356,7 @@ test("a load that overtakes an in-flight prefetch imports the module only once",
 	assert.equal((globalThis as any).__piLazyRace, 1);
 });
 
-test("init folds a newly discovered package into every saved snapshot", async () => {
+test("init brings every saved snapshot up to the live plugin set", async () => {
 	const agent = tempDir();
 	const p1 = join(agent, "p1");
 	const p2 = join(agent, "p2");
@@ -374,7 +374,10 @@ test("init folds a newly discovered package into every saved snapshot", async ()
 	await lazy.handler("snapshot base", pi.ctx);
 	await lazy.handler("snapshot alt", pi.ctx);
 
-	// p2 arrives the way `pi install` leaves it: registered, unknown to the catalog.
+	// p2 is already in the live catalog, so this init discovers nothing new — the
+	// snapshots must still be synced. Propagating only newly discovered packages
+	// would leave them stale here, which is the case this test exists for.
+	writeJson(join(agent, "lazy.json"), { version: 1, specs: [{ name: "p1", source: p1, lazy: false }, { name: "p2", source: p2, lazy: false }] });
 	writeJson(join(agent, "settings.json"), { packages: [p1, p2] });
 	await lazy.handler("init", pi.ctx);
 
