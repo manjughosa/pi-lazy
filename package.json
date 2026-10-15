@@ -30,8 +30,8 @@
     "LICENSE",
     "README.md",
     "CHANGELOG.md",
-    "dist",
-    "examples"
+    "dist/index.js",
+    "examples/lazy.json"
   ],
   "exports": {
     ".": "./dist/index.js",
