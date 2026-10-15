@@ -391,6 +391,7 @@ So declare the commands and tools you actually want to trigger a load:
 | `/lazy auto` | Show whether keyword/event auto-load is on |
 | `/lazy auto on\|off` | Toggle auto-load and persist to `lazy.json` |
 | `/lazy init` | Overwrite `lazy.json` with the built-in default catalog |
+| `/lazy doctor` | Diagnose catalog vs settings vs runtime inconsistencies (invalid lazy values, duplicates, un-migrated entries, poisoned loads) |
 | `/lazy config` | Print the absolute path to `lazy.json` |
 | `/lazy profile` | Show in-session catalog, resolution, and load timings |
 

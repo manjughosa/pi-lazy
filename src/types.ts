@@ -60,6 +60,10 @@ export interface LazyConfig {
 	afterStartAdaptiveYield?: boolean;
 	/** Import the next slice's modules while the current slice activates (default true). */
 	afterStartPrefetch?: boolean;
+	/** When true, pi-extmgr compat patch is auto-applied on session start (default true). */
+	managerCompat?: boolean;
+	/** When false, the pi-powerline-footer fast-welcome compat patch is skipped (default true). */
+	footerCompat?: boolean;
 	specs: LazySpec[];
 }
 

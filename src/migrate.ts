@@ -77,9 +77,10 @@ export function migrateSettings(agentDir = getAgentDir()): MigrateResult {
 		const idx = findSettingsPackageIndex(packages, spec.source);
 
 		if (idx === -1) {
-			packages.push({ source, extensions: [] });
-			added.push(spec.name);
-			changed.push(`${spec.name} (added)`);
+			// Guard 1: never fabricate an entry for a package not in settings.
+			// Upstream pushed {source, extensions: []} here, which made /lazy
+			// migrate a source of phantom packages (user's "15 → 20" packages).
+			skipped.push(`${spec.name} (not registered; left alone)`);
 			continue;
 		}
 
@@ -91,11 +92,21 @@ export function migrateSettings(agentDir = getAgentDir()): MigrateResult {
 		}
 
 		if (current && typeof current === "object") {
-			const obj = { ...(current as Record<string, unknown>) };
-			if (Array.isArray(obj.extensions) && obj.extensions.length === 0) {
+			const filters = Array.isArray(current.extensions) ? (current.extensions as unknown[]) : [];
+			if (filters.length === 0) {
+				// Already in lazy form — leave untouched (also skips extmgr's
+				// "all disabled" `[]`, which is ambiguous but already inert).
 				skipped.push(spec.name);
 				continue;
 			}
+			const blocking = filters.some((t) => typeof t === "string" && (t.trim().startsWith("-") || t.trim().startsWith("!")));
+			if (blocking) {
+				// Guard 2: entry carries exclusion markers → yield to extmgr / pi
+				// config; never overwrite them with [].
+				skipped.push(`${spec.name} (yielded: entry has exclusions)`);
+				continue;
+			}
+			const obj = { ...(current as Record<string, unknown>) };
 			obj.extensions = [];
 			if (typeof obj.source !== "string") obj.source = source;
 			packages[idx] = obj;

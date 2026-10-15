@@ -36,7 +36,7 @@ export function defaultConfig(): LazyConfig {
 	return {
 		version: 1,
 		defaults: { lazy: true },
-		auto: true,
+		auto: false,
 		autoLoadLimit: 1,
 		afterStartBatchSize: 1,
 		afterStartDelayMs: 0,
@@ -44,12 +44,9 @@ export function defaultConfig(): LazyConfig {
 		afterStartPauseDuringTurn: true,
 		afterStartAdaptiveYield: true,
 		afterStartPrefetch: true,
+		managerCompat: true,
+		footerCompat: true,
 		specs: [
-			// Providers / always-on identity
-			{ name: "grok-cli", source: "npm:pi-grok-cli", lazy: false, description: "Grok CLI provider" },
-			{ name: "antigravity", source: "npm:pi-antigravity", lazy: false, description: "Antigravity provider" },
-			{ name: "cursor", source: "npm:@rahularya01/pi-cursor", lazy: false, description: "Cursor provider bridge" },
-
 			// VeryLazy — common after UI is up
 			{
 				name: "subagents",
@@ -73,20 +70,6 @@ export function defaultConfig(): LazyConfig {
 				priority: 20,
 				tools: ["ask_user_question"],
 			},
-			{
-				name: "hypa",
-				source: "npm:@hypabolic/pi-hypa",
-				lazy: "after-start",
-				priority: 30,
-				description: "Hypa compressed tools",
-			},
-			{
-				name: "paster",
-				source: "npm:pi-paster",
-				lazy: "after-start",
-				priority: 40,
-				description: "Clipboard / paste helpers",
-			},
 
 			// On-demand — heavy / situational
 			{
@@ -105,32 +88,6 @@ export function defaultConfig(): LazyConfig {
 				cmd: ["mcp"],
 				keywords: ["mcp", "playwright", "clickup"],
 				description: "MCP server bridge",
-			},
-			{
-				name: "context-mode",
-				source: "npm:context-mode",
-				lazy: true,
-				cmd: ["context-mode", "ctx"],
-				tools: ["ctx_execute", "ctx_search", "ctx_index"],
-				keywords: ["context-mode", "ctx_execute"],
-				description: "Context-mode tools + skills",
-			},
-			{
-				name: "lens",
-				source: "npm:pi-lens",
-				lazy: true,
-				cmd: ["lens"],
-				tools: ["lens_diagnostics", "symbol_search", "module_report", "lsp_diagnostics"],
-				keywords: ["diagnostics", "symbol search", "ast-grep", "lsp"],
-				description: "pi-lens code intelligence",
-			},
-			{
-				name: "plannotator",
-				source: "npm:@plannotator/pi-extension",
-				lazy: true,
-				cmd: ["plannotator", "plan"],
-				keywords: ["plannotator", "plan mode"],
-				description: "Plan mode / plannotator",
 			},
 		],
 	};
@@ -335,6 +292,8 @@ export function loadConfig(agentDir = getAgentDir()): LazyConfig {
 			afterStartPauseDuringTurn: normalizeBoolean(raw.afterStartPauseDuringTurn, true),
 			afterStartAdaptiveYield: normalizeBoolean(raw.afterStartAdaptiveYield, true),
 			afterStartPrefetch: normalizeBoolean(raw.afterStartPrefetch, true),
+			managerCompat: raw.managerCompat === true,
+			footerCompat: raw.footerCompat === false ? false : true,
 			specs,
 		};
 	} catch (err) {

@@ -9,3 +9,4 @@ node_modules/
 .integration-report.json
 .test-build-*
 *.tgz
+.bak-src/

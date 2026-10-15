@@ -1,8 +1,11 @@
 {
-  "name": "@rahularya01/pi-lazy",
-  "version": "0.3.1",
-  "description": "LazyVim-style extension manager for Pi Coding Agent — load packages after start or on demand (cmd/tools/keywords).",
+  "name": "pi-lazy",
+  "version": "0.4.0",
+  "description": "LazyVim-style extension manager for Pi Coding Agent — community-maintained fork of @rahularya01/pi-lazy with compat layers, doctor, and maintainer patches.",
   "author": "Rahul Arya",
+  "contributors": [
+    "Manjūṣaka (fork maintainer)"
+  ],
   "license": "MIT",
   "type": "module",
   "keywords": [
@@ -17,11 +20,11 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Rahularya01/pi-lazy.git"
+    "url": "git+https://github.com/manjughosa/pi-lazy.git"
   },
-  "homepage": "https://github.com/Rahularya01/pi-lazy#readme",
+  "homepage": "https://github.com/manjughosa/pi-lazy#readme",
   "bugs": {
-    "url": "https://github.com/Rahularya01/pi-lazy/issues"
+    "url": "https://github.com/manjughosa/pi-lazy/issues"
   },
   "files": [
     "LICENSE",
@@ -51,11 +54,10 @@
       "./dist/index.js"
     ]
   },
-  "dependencies": {
-    "typebox": "^1.0.17"
-  },
+  "dependencies": {},
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": ">=0.81.1"
+    "@earendil-works/pi-coding-agent": ">=0.81.1",
+    "typebox": "^1.0.17"
   },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "^0.84.2",

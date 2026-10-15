@@ -182,7 +182,7 @@ export function normalizeSourceKey(source: string): string {
 	return trimmed;
 }
 
-function sourcesMatch(left: string, right: string): boolean {
+export function sourcesMatch(left: string, right: string): boolean {
 	const leftNpm = npmPackageIdentity(left);
 	const rightNpm = npmPackageIdentity(right);
 	if (leftNpm || rightNpm) {

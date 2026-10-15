@@ -21,10 +21,11 @@ import {
 } from "./config.ts";
 import { loadResolvedEntry, prefetchEntry } from "./loader.ts";
 import { migrateSettings } from "./migrate.ts";
-import { isModuleLazyInSettings, resolveSpecPaths } from "./resolve.ts";
+import { isModuleLazyInSettings, resolveSpecPaths, sourcesMatch, findSettingsPackageIndices } from "./resolve.ts";
 import { performance } from "node:perf_hooks";
 import type { LazyConfig, LoadResult, ResolvedEntry } from "./types.ts";
-import { copyFileSync, existsSync, readFileSync } from "node:fs";
+import { copyFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { getSettingsPath } from "./config.ts";
 
 interface Runtime {
@@ -143,22 +144,16 @@ function formatStatus(rt: Runtime): string {
 
 function refreshStatus(pi: ExtensionAPI, rt: Runtime, ctx?: ExtensionContext) {
 	rt.status = formatStatus(rt);
-	// Prefer the freshest known ctx: a passed-in ctx captured before an async
-	// gap (e.g. runAfterStart's setTimeout) can go stale if the session gets
-	// replaced/reloaded in the meantime, while rt.sessionCtx is updated
-	// synchronously by every session_start.
-	const target = rt.sessionCtx ?? ctx;
-	if (!target) return;
-	try {
-		// ctx.ui is a getter that throws once the ctx is stale, so even reading
-		// it must be guarded — a status-bar update is never worth crashing pi.
-		const ui = target.ui;
-		if (ui && typeof ui.setStatus === "function") {
-			ui.setStatus("pi-lazy", rt.status);
-		}
-	} catch {
-		// stale ctx — session was replaced/reloaded since this ctx was captured.
-	}
+	globalThis.__piLazyStatus = rt.status;
+	globalThis.__piLazyManagedSources = new Set(
+		[...rt.entries.values()]
+			.filter((e) => e.spec.lazy !== false)
+			.map((e) => e.spec.source),
+	);
+	// Fork P6/P7/P10: the status line is rendered by persona-loader's widget on
+	// the top (reads globalThis.__piLazyStatus) — do NOT call ui.setStatus here
+	// or a duplicate copy appears in the bottom status bar. __piLazyManagedSources
+	// is consumed by pi-extmgr's compat layer (ensureManagerCompat).
 }
 
 /** Best-effort notify: a stale ctx must never crash the whole pi process. */
@@ -169,6 +164,280 @@ function notifySafe(ctx: ExtensionContext | undefined, message: string, type?: "
 	} catch {
 		// stale ctx — session was replaced/reloaded since this ctx was captured.
 	}
+}
+
+function runDoctor(agentDir: string, rt: Runtime) {
+  const lines = [];
+  const settingsPath = getSettingsPath(agentDir);
+  try {
+    const rawCfg = JSON.parse(readFileSync(getLazyConfigPath(agentDir), "utf-8"));
+    const rawSpecs = Array.isArray(rawCfg?.specs) ? rawCfg.specs : [];
+    for (const s of rawSpecs) {
+      const v = s?.lazy;
+      if (v !== void 0 && v !== false && v !== true && v !== "after-start") {
+        lines.push(`X spec "${s?.name ?? "?"}": lazy 值非法 ${JSON.stringify(v)}（只能 false / true / "after-start"）→ 该 spec 被静默丢弃`);
+      }
+    }
+  } catch (err) {
+    lines.push(`X lazy.json 解析失败（正在用内置兜底目录，部分包不会加载）: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  let packages;
+  try {
+    const parsed = JSON.parse(readFileSync(settingsPath, "utf-8"));
+    packages = Array.isArray(parsed.packages) ? parsed.packages : [];
+  } catch (err) {
+    lines.push(`X settings.json 读取失败: ${err instanceof Error ? err.message : String(err)}`);
+    return lines;
+  }
+  const sourceOf = (p: unknown): string =>
+    typeof p === "string" ? p : p && typeof p === "object" && "source" in p && typeof p.source === "string" ? p.source : "";
+  const counts = /* @__PURE__ */ new Map();
+  for (const p of packages) {
+    const src = sourceOf(p);
+    if (src) counts.set(src, (counts.get(src) ?? 0) + 1);
+  }
+  for (const [src, n] of counts) if (n > 1) lines.push(`X settings 重复条目 x${n}: ${src}`);
+  const extDir = join(agentDir, "extensions");
+  for (const p of packages) {
+    if (p && typeof p === "object" && sourceOf(p).startsWith(extDir)) {
+      lines.push(`X 重复登记（settings 与 extensions/ 目录都会加载，会跑两遍）: ${sourceOf(p)}`);
+    }
+  }
+  for (const spec of rt.config.specs) {
+    const managed = spec.lazy !== false;
+    const idx = findSettingsPackageIndices(packages, spec.source);
+    if (idx.length === 0) {
+      lines.push(`- ${spec.name}: 未注册在 settings（lazy 不会碰它）`);
+      continue;
+    }
+    if (idx.length > 1) {
+      lines.push(`X ${spec.name}: settings 里有 ${idx.length} 条重复`);
+      continue;
+    }
+    const entry = packages[idx[0]];
+    if (typeof entry === "string") {
+      if (managed) lines.push(`! ${spec.name}: 纯字符串 = 未 migrate，lazy=${JSON.stringify(spec.lazy)} 未生效 → 跑 /lazy migrate`);
+      continue;
+    }
+    const filters = Array.isArray(entry.extensions) ? entry.extensions : [];
+    const blocking = filters.some((t: unknown) => typeof t === "string" && (t.trim().startsWith("-") || t.trim().startsWith("!")));
+    if (filters.length === 0) {
+      if (!managed) lines.push(`! ${spec.name}: 已被 lazy 接管但 lazy=false → /lazy migrate 交回 extmgr`);
+    } else if (blocking) {
+      lines.push(`! ${spec.name}: 带排除标记 ${JSON.stringify(filters)} → lazy 让位（归 extmgr / pi config）`);
+    } else {
+      lines.push(`! ${spec.name}: 带放行标记 ${JSON.stringify(filters)} → 下次 /lazy migrate 会收回为 []`);
+    }
+    const triggers = (spec.cmd ?? []).length + (spec.tools ?? []).length + (spec.keywords ?? []).length + (spec.event ?? []).length;
+    if (spec.lazy === true && triggers === 0) {
+      lines.push(`   ↳ 无触发入口（lazy=true）：只能 /lazy load ${spec.name}（或模型调 lazy_load）`);
+    }
+  }
+  const specSources = rt.config.specs.map((s) => s.source);
+  const outside = packages.map(sourceOf).filter((src: string) => src && !specSources.some((s) => sourcesMatch(src, s)));
+  if (outside.length) lines.push(`- 未纳入 lazy（启动即加载）: ${outside.join(", ")}`);
+  if (rt.entries && typeof rt.entries.values === "function") {
+    const all = [...rt.entries.values()];
+    for (const e of all) {
+      if (e.state === "error" || e.state === "poisoned") {
+        lines.push(`X ${e.spec.name}: 加载失败 (${e.state}) ${e.error ?? ""}`.trim());
+      }
+    }
+    const stuck = all.filter((e) => e.state === "pending" && e.spec.lazy === "after-start");
+    if (stuck.length && !rt.afterStartQueued) {
+      lines.push(`X after-start 队列已结束但仍有 ${stuck.length} 个 pending（= 懒加载没生效）: ${stuck.map((e) => e.spec.name).join(", ")}`);
+    }
+    const loaded = all.filter((e) => e.state === "loaded").length;
+    lines.push(`· 运行态: ${loaded} loaded / ${all.filter((e) => e.state === "pending").length} pending / ${all.filter((e) => e.state === "eager").length} eager${rt.afterStartQueued ? " (after-start 队列进行中)" : ""}`);
+  }
+  return lines.length ? lines : ["clean: 未发现异常"];
+}
+
+function ensureManagerCompat(agentDir: string, rt: Runtime) {
+  if (rt.config.managerCompat !== true) return;
+  const file = join(agentDir, "npm", "node_modules", "pi-extmgr", "src", "packages", "extensions.ts");
+  if (!existsSync(file)) return;
+  let src;
+  try {
+    src = readFileSync(file, "utf-8");
+  } catch {
+    return;
+  }
+  if (src.includes("__piLazyManagedSources")) return; // 已打过
+  // 三处替换，全部命中才写入（全有或全无）
+  const steps = [
+    [
+      "    const resolvedResources = resourcesForPackage(canonicalResources, pkg.source, pkg.scope);\n",
+      "    const resolvedResources = resourcesForPackage(canonicalResources, pkg.source, pkg.scope);\n" +
+        "    const pkgFiltersLazy =\n" +
+        '      (pkg.scope === "global" ? globalFilterMap : projectFilterMap).get(\n' +
+        "        normalizeConfiguredPackageSource(pkg.source)\n" +
+        "      ) ?? undefined;\n" +
+        "    // pi-lazy 兼容：settings 里 extensions:[] + 该包被 lazy 接管 = 延迟加载，不是禁用\n" +
+        "    // 只认 []（lazy 已接管）；带 -/! 标记的条目是 extmgr 自己禁的，保持 disabled\n" +
+        "    const lazyDeferred =\n" +
+        "      Array.isArray(pkgFiltersLazy) &&\n" +
+        "      pkgFiltersLazy.length === 0 &&\n" +
+        "      !!(globalThis as { __piLazyManagedSources?: Set<string> }).__piLazyManagedSources?.has(\n" +
+        "        pkg.source\n" +
+        "      );\n",
+    ],
+    [
+      '          state: resource.enabled ? "enabled" : "disabled",',
+      '          state: resource.enabled || lazyDeferred ? "enabled" : "disabled",',
+    ],
+    [
+      "      const state = getPackageFilterState(packageFilters, normalizedPath);",
+      '      let state = getPackageFilterState(packageFilters, normalizedPath);\n      if (state === "disabled" && lazyDeferred) state = "enabled";',
+    ],
+  ];
+  for (const [anchor] of steps) {
+    if (!src.includes(anchor)) {
+      console.error("[pi-lazy] pi-extmgr 兼容补丁跳过：锚点未命中 " + JSON.stringify(anchor.slice(0, 50)));
+      return;
+    }
+  }
+  for (const [anchor, replacement] of steps) src = src.replace(anchor, replacement);
+  try {
+    writeFileSync(file, src);
+    console.error("[pi-lazy] re-patched pi-extmgr for lazy compat (restart to take effect)");
+  } catch {
+  }
+}
+
+function ensureFooterCompat(agentDir: string, rt: Runtime) {
+  if (rt.config.footerCompat === false) return;
+  const dir = join(agentDir, "npm", "node_modules", "pi-powerline-footer");
+  const indexFile = join(dir, "index.ts");
+  const welcomeFile = join(dir, "welcome.ts");
+  if (!existsSync(indexFile) || !existsSync(welcomeFile)) return;
+  let indexSrc;
+  let welcomeSrc;
+  try {
+    indexSrc = readFileSync(indexFile, "utf-8");
+    welcomeSrc = readFileSync(welcomeFile, "utf-8");
+  } catch {
+    return;
+  }
+  // 幂等：两个文件都已带标记就跳过
+  if (indexSrc.includes("getRecentSessionsFast") && welcomeSrc.includes("setRecentSessions")) return;
+  const helper = `  // [本地补丁] 欢迎浮层/顶栏不再等 getRecentSessions
+  //
+  // 原因：getRecentSessions 会对「最近 3 个会话日志」做 open()，其中最新那个就是当前正在写入的会话文件。
+  // 实测（本机 Windows + Defender）：对该文件的首次 open 要 ~8s（同进程第二次 0ms，已关闭的旧文件 0ms，
+  // 包括 12.9MB 的也是 0ms）→ 卡的是「刚被写过的活跃文件」，不是体积。
+  // 这一行 await 原本就在欢迎浮层/顶栏的渲染路径上，于是：
+  //   t≈100ms  浮层开始准备
+  //   t≈750ms  pi-lazy 的 after-start 队列起跑（每包 ~0.5-0.9s，间隔让出 ≤250ms，最后一包 ~6s）
+  //   t≈8s     上面那个 open 才返回 → 队列早跑完了 → 浮层才画出来
+  // 观感就是「懒加载全部跑完，美化弹窗才蹦出来」。
+  //
+  // 修法：给最近会话列表一个很短的超时，超时就用空列表先把 UI 画出来，不阻塞首帧；
+  // 真正的列表迟到时再补画（顶栏重新 setHeader，浮层 setRecentSessions + requestRender）。
+  async function getRecentSessionsFast(request: AbortController): Promise<RecentSession[]> {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    try {
+      return await Promise.race([
+        getRecentSessions(3, request.signal),
+        new Promise<RecentSession[]>((resolve) => {
+          timer = setTimeout(() => resolve([]), WELCOME_RECENT_SESSIONS_TIMEOUT_MS);
+        }),
+      ]);
+    } catch {
+      return [];
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+`;
+  const headerLate = `        // [本地补丁] 上面超时了就先用空列表把顶栏画出来，等真正的最近会话到了再补画一次。
+        if (recentSessions.length === 0) {
+          void getRecentSessions(3, request.signal).then((lateSessions) => {
+            if (lateSessions.length === 0 || !welcomeHeaderActive) return;
+            if (!canShowWelcome(ctx, request, generation)) return;
+            ctx.ui.setHeader(() => new WelcomeHeader(
+              modelName,
+              providerName,
+              lateSessions,
+              discoverLoadedCounts(pi.getCommands()),
+              estimateInitialContextTokens(ctx),
+            ));
+          }).catch(() => {});
+        }
+`;
+  const overlayLate = `            // [本地补丁] 上面超时了就先弹空列表的浮层，等真正的最近会话到了再回填重画。
+            if (recentSessions.length === 0) {
+              void getRecentSessions(3, request.signal).then((lateSessions) => {
+                if (dismissed || lateSessions.length === 0) return;
+                welcome.setRecentSessions(lateSessions);
+                tui.requestRender();
+              }).catch(() => {});
+            }
+`;
+  const plan = [
+    {
+      file: indexFile,
+      src: indexSrc,
+      steps: [
+        [
+          'import { WelcomeComponent, WelcomeHeader, discoverLoadedCounts, getRecentSessions } from "./welcome.ts";\n',
+          'import { WelcomeComponent, WelcomeHeader, discoverLoadedCounts, getRecentSessions, type RecentSession } from "./welcome.ts";\n',
+        ],
+        [
+          "const STASH_PREVIEW_WIDTH = 72;\n",
+          "const STASH_PREVIEW_WIDTH = 72;\n// [本地补丁] 欢迎浮层/顶栏等最近会话列表的上限；超时先画空列表（详见 getRecentSessionsFast）。\nconst WELCOME_RECENT_SESSIONS_TIMEOUT_MS = 400;\n",
+        ],
+        ["  function setupWelcomeHeader(ctx: any) {", helper + "  function setupWelcomeHeader(ctx: any) {"],
+        [
+          "        const recentSessions = await getRecentSessions(3, request.signal);\n        if (!canShowWelcome(ctx, request, generation)) return;\n",
+          "        const recentSessions = await getRecentSessionsFast(request);\n        if (!canShowWelcome(ctx, request, generation)) return;\n",
+        ],
+        [
+          "        welcomeHeaderActive = true;\n        ctx.ui.setHeader(() => header);\n",
+          "        welcomeHeaderActive = true;\n        ctx.ui.setHeader(() => header);\n\n" + headerLate,
+        ],
+        [
+          "        if (!canShowWelcome(ctx, request, overlaySessionGeneration)) return;\n        const recentSessions = await getRecentSessions(3, request.signal);\n",
+          "        if (!canShowWelcome(ctx, request, overlaySessionGeneration)) return;\n        const recentSessions = await getRecentSessionsFast(request);\n",
+        ],
+        [
+          "            const welcome = new WelcomeComponent(\n              modelName,\n              providerName,\n              recentSessions,\n              loadedCounts,\n              initialContextTokens,\n            );\n",
+          "            const welcome = new WelcomeComponent(\n              modelName,\n              providerName,\n              recentSessions,\n              loadedCounts,\n              initialContextTokens,\n            );\n\n" + overlayLate,
+        ],
+      ],
+    },
+    {
+      file: welcomeFile,
+      src: welcomeSrc,
+      steps: [
+        [
+          "  setCountdown(seconds: number): void {\n    this.countdown = seconds;\n  }\n",
+          "  setCountdown(seconds: number): void {\n    this.countdown = seconds;\n  }\n\n  // [本地补丁] 首帧不再等 getRecentSessions（见 index.ts 的 getRecentSessionsFast 注释）。\n  // 最近会话列表迟到时，由 index.ts 回填并 requestRender。\n  setRecentSessions(sessions: RecentSession[]): void {\n    this.data = { ...this.data, recentSessions: sessions };\n  }\n",
+        ],
+      ],
+    },
+  ];
+  const outs = [];
+  for (const p of plan) {
+    let out = p.src;
+    for (const [anchor, repl] of p.steps) {
+      const hits = out.split(anchor).length - 1;
+      if (hits !== 1) {
+        console.error(`[pi-lazy] pi-powerline-footer 兼容补丁跳过：锚点未命中或重复（${hits} 次）${JSON.stringify(anchor.slice(0, 60))}`);
+        return;
+      }
+      out = out.replace(anchor, () => repl);
+    }
+    outs.push([p.file, out]);
+  }
+  try {
+    for (const [file, out] of outs) writeFileSync(file, out);
+  } catch (err) {
+    console.error(`[pi-lazy] pi-powerline-footer 兼容补丁写入失败: ${err instanceof Error ? err.message : String(err)}`);
+    return;
+  }
+  console.error("[pi-lazy] re-patched pi-powerline-footer for fast welcome (restart to take effect)");
 }
 
 function recordTiming(rt: Runtime, label: string, started: number) {
@@ -548,6 +817,8 @@ export function createPiLazy(pi: ExtensionAPI, agentDir = getAgentDir()) {
 		// they exit on their generation check.
 		drainResumeWaiters(rt);
 		refreshStatus(pi, rt, ctx);
+		ensureManagerCompat(agentDir, rt);
+		ensureFooterCompat(agentDir, rt);
 
 		const needsMigrate = [...rt.entries.values()].some(
 			(e) => isManagedLazy(e.spec) && !e.moduleLazyReady,
@@ -585,9 +856,9 @@ export function createPiLazy(pi: ExtensionAPI, agentDir = getAgentDir()) {
 	});
 
 	pi.registerCommand("lazy", {
-		description: "LazyVim-style extension manager (list|load|migrate|auto|init|status)",
+		description: "LazyVim-style extension manager (list|load|migrate|auto|init|status|doctor)",
 		getArgumentCompletions: (prefix) => {
-			const sub = ["status", "list", "load", "migrate", "auto", "init", "config", "profile"];
+			const sub = ["status", "list", "load", "migrate", "auto", "init", "config", "profile", "doctor"];
 			const names = [...rt.entries.keys()].map((n) => `load ${n}`);
 			const items = [...sub, ...names, "auto on", "auto off"].map((v) => ({ value: v, label: v }));
 			const filtered = items.filter((i) => i.value.startsWith(prefix) || i.value.includes(prefix));
@@ -673,6 +944,7 @@ export function createPiLazy(pi: ExtensionAPI, agentDir = getAgentDir()) {
 					ctx.ui.notify(`migrate failed: ${result.error}`, "error");
 					return;
 				}
+
 				const lines = [
 					result.changed.length ? `updated: ${result.changed.join(", ")}` : "no package changes needed",
 					result.skipped.length ? `already lazy: ${result.skipped.join(", ")}` : "",
@@ -686,7 +958,12 @@ export function createPiLazy(pi: ExtensionAPI, agentDir = getAgentDir()) {
 				return;
 			}
 
-			if (sub === "load") {
+			if (sub === "doctor") {
+				ctx.ui.notify(runDoctor(agentDir, rt).join("\n"), "info");
+				return;
+			}
+
+			if (sub === "load" || sub === "l") {
 				const name = rest.join(" ").trim();
 				if (!name) {
 					ctx.ui.notify("usage: /lazy load <name>", "warning");
@@ -761,4 +1038,9 @@ export function createPiLazy(pi: ExtensionAPI, agentDir = getAgentDir()) {
 
 export default function piLazy(pi: ExtensionAPI) {
 	return createPiLazy(pi, getAgentDir());
+}
+
+declare global {
+	var __piLazyStatus: string | undefined;
+	var __piLazyManagedSources: Set<string> | undefined;
 }

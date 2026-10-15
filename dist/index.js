@@ -29,7 +29,7 @@ function defaultConfig() {
   return {
     version: 1,
     defaults: { lazy: true },
-    auto: true,
+    auto: false,
     autoLoadLimit: 1,
     afterStartBatchSize: 1,
     afterStartDelayMs: 0,
@@ -37,11 +37,9 @@ function defaultConfig() {
     afterStartPauseDuringTurn: true,
     afterStartAdaptiveYield: true,
     afterStartPrefetch: true,
+    managerCompat: true,
+    footerCompat: true,
     specs: [
-      // Providers / always-on identity
-      { name: "grok-cli", source: "npm:pi-grok-cli", lazy: false, description: "Grok CLI provider" },
-      { name: "antigravity", source: "npm:pi-antigravity", lazy: false, description: "Antigravity provider" },
-      { name: "cursor", source: "npm:@rahularya01/pi-cursor", lazy: false, description: "Cursor provider bridge" },
       // VeryLazy — common after UI is up
       {
         name: "subagents",
@@ -65,20 +63,6 @@ function defaultConfig() {
         priority: 20,
         tools: ["ask_user_question"]
       },
-      {
-        name: "hypa",
-        source: "npm:@hypabolic/pi-hypa",
-        lazy: "after-start",
-        priority: 30,
-        description: "Hypa compressed tools"
-      },
-      {
-        name: "paster",
-        source: "npm:pi-paster",
-        lazy: "after-start",
-        priority: 40,
-        description: "Clipboard / paste helpers"
-      },
       // On-demand — heavy / situational
       {
         name: "web",
@@ -96,32 +80,6 @@ function defaultConfig() {
         cmd: ["mcp"],
         keywords: ["mcp", "playwright", "clickup"],
         description: "MCP server bridge"
-      },
-      {
-        name: "context-mode",
-        source: "npm:context-mode",
-        lazy: true,
-        cmd: ["context-mode", "ctx"],
-        tools: ["ctx_execute", "ctx_search", "ctx_index"],
-        keywords: ["context-mode", "ctx_execute"],
-        description: "Context-mode tools + skills"
-      },
-      {
-        name: "lens",
-        source: "npm:pi-lens",
-        lazy: true,
-        cmd: ["lens"],
-        tools: ["lens_diagnostics", "symbol_search", "module_report", "lsp_diagnostics"],
-        keywords: ["diagnostics", "symbol search", "ast-grep", "lsp"],
-        description: "pi-lens code intelligence"
-      },
-      {
-        name: "plannotator",
-        source: "npm:@plannotator/pi-extension",
-        lazy: true,
-        cmd: ["plannotator", "plan"],
-        keywords: ["plannotator", "plan mode"],
-        description: "Plan mode / plannotator"
       }
     ]
   };
@@ -304,6 +262,8 @@ function loadConfig(agentDir = getAgentDir()) {
       afterStartPauseDuringTurn: normalizeBoolean(raw.afterStartPauseDuringTurn, true),
       afterStartAdaptiveYield: normalizeBoolean(raw.afterStartAdaptiveYield, true),
       afterStartPrefetch: normalizeBoolean(raw.afterStartPrefetch, true),
+      managerCompat: raw.managerCompat === true,
+      footerCompat: raw.footerCompat === false ? false : true,
       specs
     };
   } catch (err) {
@@ -984,9 +944,7 @@ function migrateSettings(agentDir = getAgentDir3()) {
     const source = packageSource(spec);
     const idx = findSettingsPackageIndex(packages, spec.source);
     if (idx === -1) {
-      packages.push({ source, extensions: [] });
-      added.push(spec.name);
-      changed.push(`${spec.name} (added)`);
+      skipped.push(`${spec.name} (not registered; left alone)`);
       continue;
     }
     const current = packages[idx];
@@ -996,11 +954,17 @@ function migrateSettings(agentDir = getAgentDir3()) {
       continue;
     }
     if (current && typeof current === "object") {
-      const obj = { ...current };
-      if (Array.isArray(obj.extensions) && obj.extensions.length === 0) {
+      const filters = Array.isArray(current.extensions) ? current.extensions : [];
+      if (filters.length === 0) {
         skipped.push(spec.name);
         continue;
       }
+      const blocking = filters.some((t) => typeof t === "string" && (t.trim().startsWith("-") || t.trim().startsWith("!")));
+      if (blocking) {
+        skipped.push(`${spec.name} (yielded: entry has exclusions)`);
+        continue;
+      }
+      const obj = { ...current };
       obj.extensions = [];
       if (typeof obj.source !== "string") obj.source = source;
       packages[idx] = obj;
@@ -1041,7 +1005,8 @@ function migrateSettings(agentDir = getAgentDir3()) {
 
 // src/index.ts
 import { performance } from "node:perf_hooks";
-import { copyFileSync as copyFileSync2, existsSync as existsSync5, readFileSync as readFileSync5 } from "node:fs";
+import { copyFileSync as copyFileSync2, existsSync as existsSync5, readFileSync as readFileSync5, writeFileSync as writeFileSync2 } from "node:fs";
+import { join as join4 } from "node:path";
 var MAX_ADAPTIVE_YIELD_MS = 250;
 var PAUSE_TIMEOUT_MS = 6e4;
 function sleep(ms) {
@@ -1119,15 +1084,10 @@ function formatStatus(rt) {
 }
 function refreshStatus(pi, rt, ctx) {
   rt.status = formatStatus(rt);
-  const target = rt.sessionCtx ?? ctx;
-  if (!target) return;
-  try {
-    const ui = target.ui;
-    if (ui && typeof ui.setStatus === "function") {
-      ui.setStatus("pi-lazy", rt.status);
-    }
-  } catch {
-  }
+  globalThis.__piLazyStatus = rt.status;
+  globalThis.__piLazyManagedSources = new Set(
+    [...rt.entries.values()].filter((e) => e.spec.lazy !== false).map((e) => e.spec.source)
+  );
 }
 function notifySafe(ctx, message, type) {
   if (!ctx) return;
@@ -1135,6 +1095,262 @@ function notifySafe(ctx, message, type) {
     ctx.ui.notify(message, type);
   } catch {
   }
+}
+function runDoctor(agentDir, rt) {
+  const lines = [];
+  const settingsPath = getSettingsPath(agentDir);
+  try {
+    const rawCfg = JSON.parse(readFileSync5(getLazyConfigPath(agentDir), "utf-8"));
+    const rawSpecs = Array.isArray(rawCfg?.specs) ? rawCfg.specs : [];
+    for (const s of rawSpecs) {
+      const v = s?.lazy;
+      if (v !== void 0 && v !== false && v !== true && v !== "after-start") {
+        lines.push(`X spec "${s?.name ?? "?"}": lazy \u503C\u975E\u6CD5 ${JSON.stringify(v)}\uFF08\u53EA\u80FD false / true / "after-start"\uFF09\u2192 \u8BE5 spec \u88AB\u9759\u9ED8\u4E22\u5F03`);
+      }
+    }
+  } catch (err) {
+    lines.push(`X lazy.json \u89E3\u6790\u5931\u8D25\uFF08\u6B63\u5728\u7528\u5185\u7F6E\u515C\u5E95\u76EE\u5F55\uFF0C\u90E8\u5206\u5305\u4E0D\u4F1A\u52A0\u8F7D\uFF09: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  let packages;
+  try {
+    const parsed = JSON.parse(readFileSync5(settingsPath, "utf-8"));
+    packages = Array.isArray(parsed.packages) ? parsed.packages : [];
+  } catch (err) {
+    lines.push(`X settings.json \u8BFB\u53D6\u5931\u8D25: ${err instanceof Error ? err.message : String(err)}`);
+    return lines;
+  }
+  const sourceOf = (p) => typeof p === "string" ? p : p && typeof p === "object" && "source" in p && typeof p.source === "string" ? p.source : "";
+  const counts = /* @__PURE__ */ new Map();
+  for (const p of packages) {
+    const src = sourceOf(p);
+    if (src) counts.set(src, (counts.get(src) ?? 0) + 1);
+  }
+  for (const [src, n] of counts) if (n > 1) lines.push(`X settings \u91CD\u590D\u6761\u76EE x${n}: ${src}`);
+  const extDir = join4(agentDir, "extensions");
+  for (const p of packages) {
+    if (p && typeof p === "object" && sourceOf(p).startsWith(extDir)) {
+      lines.push(`X \u91CD\u590D\u767B\u8BB0\uFF08settings \u4E0E extensions/ \u76EE\u5F55\u90FD\u4F1A\u52A0\u8F7D\uFF0C\u4F1A\u8DD1\u4E24\u904D\uFF09: ${sourceOf(p)}`);
+    }
+  }
+  for (const spec of rt.config.specs) {
+    const managed = spec.lazy !== false;
+    const idx = findSettingsPackageIndices(packages, spec.source);
+    if (idx.length === 0) {
+      lines.push(`- ${spec.name}: \u672A\u6CE8\u518C\u5728 settings\uFF08lazy \u4E0D\u4F1A\u78B0\u5B83\uFF09`);
+      continue;
+    }
+    if (idx.length > 1) {
+      lines.push(`X ${spec.name}: settings \u91CC\u6709 ${idx.length} \u6761\u91CD\u590D`);
+      continue;
+    }
+    const entry = packages[idx[0]];
+    if (typeof entry === "string") {
+      if (managed) lines.push(`! ${spec.name}: \u7EAF\u5B57\u7B26\u4E32 = \u672A migrate\uFF0Clazy=${JSON.stringify(spec.lazy)} \u672A\u751F\u6548 \u2192 \u8DD1 /lazy migrate`);
+      continue;
+    }
+    const filters = Array.isArray(entry.extensions) ? entry.extensions : [];
+    const blocking = filters.some((t) => typeof t === "string" && (t.trim().startsWith("-") || t.trim().startsWith("!")));
+    if (filters.length === 0) {
+      if (!managed) lines.push(`! ${spec.name}: \u5DF2\u88AB lazy \u63A5\u7BA1\u4F46 lazy=false \u2192 /lazy migrate \u4EA4\u56DE extmgr`);
+    } else if (blocking) {
+      lines.push(`! ${spec.name}: \u5E26\u6392\u9664\u6807\u8BB0 ${JSON.stringify(filters)} \u2192 lazy \u8BA9\u4F4D\uFF08\u5F52 extmgr / pi config\uFF09`);
+    } else {
+      lines.push(`! ${spec.name}: \u5E26\u653E\u884C\u6807\u8BB0 ${JSON.stringify(filters)} \u2192 \u4E0B\u6B21 /lazy migrate \u4F1A\u6536\u56DE\u4E3A []`);
+    }
+    const triggers = (spec.cmd ?? []).length + (spec.tools ?? []).length + (spec.keywords ?? []).length + (spec.event ?? []).length;
+    if (spec.lazy === true && triggers === 0) {
+      lines.push(`   \u21B3 \u65E0\u89E6\u53D1\u5165\u53E3\uFF08lazy=true\uFF09\uFF1A\u53EA\u80FD /lazy load ${spec.name}\uFF08\u6216\u6A21\u578B\u8C03 lazy_load\uFF09`);
+    }
+  }
+  const specSources = rt.config.specs.map((s) => s.source);
+  const outside = packages.map(sourceOf).filter((src) => src && !specSources.some((s) => sourcesMatch(src, s)));
+  if (outside.length) lines.push(`- \u672A\u7EB3\u5165 lazy\uFF08\u542F\u52A8\u5373\u52A0\u8F7D\uFF09: ${outside.join(", ")}`);
+  if (rt.entries && typeof rt.entries.values === "function") {
+    const all = [...rt.entries.values()];
+    for (const e of all) {
+      if (e.state === "error" || e.state === "poisoned") {
+        lines.push(`X ${e.spec.name}: \u52A0\u8F7D\u5931\u8D25 (${e.state}) ${e.error ?? ""}`.trim());
+      }
+    }
+    const stuck = all.filter((e) => e.state === "pending" && e.spec.lazy === "after-start");
+    if (stuck.length && !rt.afterStartQueued) {
+      lines.push(`X after-start \u961F\u5217\u5DF2\u7ED3\u675F\u4F46\u4ECD\u6709 ${stuck.length} \u4E2A pending\uFF08= \u61D2\u52A0\u8F7D\u6CA1\u751F\u6548\uFF09: ${stuck.map((e) => e.spec.name).join(", ")}`);
+    }
+    const loaded = all.filter((e) => e.state === "loaded").length;
+    lines.push(`\xB7 \u8FD0\u884C\u6001: ${loaded} loaded / ${all.filter((e) => e.state === "pending").length} pending / ${all.filter((e) => e.state === "eager").length} eager${rt.afterStartQueued ? " (after-start \u961F\u5217\u8FDB\u884C\u4E2D)" : ""}`);
+  }
+  return lines.length ? lines : ["clean: \u672A\u53D1\u73B0\u5F02\u5E38"];
+}
+function ensureManagerCompat(agentDir, rt) {
+  if (rt.config.managerCompat !== true) return;
+  const file = join4(agentDir, "npm", "node_modules", "pi-extmgr", "src", "packages", "extensions.ts");
+  if (!existsSync5(file)) return;
+  let src;
+  try {
+    src = readFileSync5(file, "utf-8");
+  } catch {
+    return;
+  }
+  if (src.includes("__piLazyManagedSources")) return;
+  const steps = [
+    [
+      "    const resolvedResources = resourcesForPackage(canonicalResources, pkg.source, pkg.scope);\n",
+      '    const resolvedResources = resourcesForPackage(canonicalResources, pkg.source, pkg.scope);\n    const pkgFiltersLazy =\n      (pkg.scope === "global" ? globalFilterMap : projectFilterMap).get(\n        normalizeConfiguredPackageSource(pkg.source)\n      ) ?? undefined;\n    // pi-lazy \u517C\u5BB9\uFF1Asettings \u91CC extensions:[] + \u8BE5\u5305\u88AB lazy \u63A5\u7BA1 = \u5EF6\u8FDF\u52A0\u8F7D\uFF0C\u4E0D\u662F\u7981\u7528\n    // \u53EA\u8BA4 []\uFF08lazy \u5DF2\u63A5\u7BA1\uFF09\uFF1B\u5E26 -/! \u6807\u8BB0\u7684\u6761\u76EE\u662F extmgr \u81EA\u5DF1\u7981\u7684\uFF0C\u4FDD\u6301 disabled\n    const lazyDeferred =\n      Array.isArray(pkgFiltersLazy) &&\n      pkgFiltersLazy.length === 0 &&\n      !!(globalThis as { __piLazyManagedSources?: Set<string> }).__piLazyManagedSources?.has(\n        pkg.source\n      );\n'
+    ],
+    [
+      '          state: resource.enabled ? "enabled" : "disabled",',
+      '          state: resource.enabled || lazyDeferred ? "enabled" : "disabled",'
+    ],
+    [
+      "      const state = getPackageFilterState(packageFilters, normalizedPath);",
+      '      let state = getPackageFilterState(packageFilters, normalizedPath);\n      if (state === "disabled" && lazyDeferred) state = "enabled";'
+    ]
+  ];
+  for (const [anchor] of steps) {
+    if (!src.includes(anchor)) {
+      console.error("[pi-lazy] pi-extmgr \u517C\u5BB9\u8865\u4E01\u8DF3\u8FC7\uFF1A\u951A\u70B9\u672A\u547D\u4E2D " + JSON.stringify(anchor.slice(0, 50)));
+      return;
+    }
+  }
+  for (const [anchor, replacement] of steps) src = src.replace(anchor, replacement);
+  try {
+    writeFileSync2(file, src);
+    console.error("[pi-lazy] re-patched pi-extmgr for lazy compat (restart to take effect)");
+  } catch {
+  }
+}
+function ensureFooterCompat(agentDir, rt) {
+  if (rt.config.footerCompat === false) return;
+  const dir = join4(agentDir, "npm", "node_modules", "pi-powerline-footer");
+  const indexFile = join4(dir, "index.ts");
+  const welcomeFile = join4(dir, "welcome.ts");
+  if (!existsSync5(indexFile) || !existsSync5(welcomeFile)) return;
+  let indexSrc;
+  let welcomeSrc;
+  try {
+    indexSrc = readFileSync5(indexFile, "utf-8");
+    welcomeSrc = readFileSync5(welcomeFile, "utf-8");
+  } catch {
+    return;
+  }
+  if (indexSrc.includes("getRecentSessionsFast") && welcomeSrc.includes("setRecentSessions")) return;
+  const helper = `  // [\u672C\u5730\u8865\u4E01] \u6B22\u8FCE\u6D6E\u5C42/\u9876\u680F\u4E0D\u518D\u7B49 getRecentSessions
+  //
+  // \u539F\u56E0\uFF1AgetRecentSessions \u4F1A\u5BF9\u300C\u6700\u8FD1 3 \u4E2A\u4F1A\u8BDD\u65E5\u5FD7\u300D\u505A open()\uFF0C\u5176\u4E2D\u6700\u65B0\u90A3\u4E2A\u5C31\u662F\u5F53\u524D\u6B63\u5728\u5199\u5165\u7684\u4F1A\u8BDD\u6587\u4EF6\u3002
+  // \u5B9E\u6D4B\uFF08\u672C\u673A Windows + Defender\uFF09\uFF1A\u5BF9\u8BE5\u6587\u4EF6\u7684\u9996\u6B21 open \u8981 ~8s\uFF08\u540C\u8FDB\u7A0B\u7B2C\u4E8C\u6B21 0ms\uFF0C\u5DF2\u5173\u95ED\u7684\u65E7\u6587\u4EF6 0ms\uFF0C
+  // \u5305\u62EC 12.9MB \u7684\u4E5F\u662F 0ms\uFF09\u2192 \u5361\u7684\u662F\u300C\u521A\u88AB\u5199\u8FC7\u7684\u6D3B\u8DC3\u6587\u4EF6\u300D\uFF0C\u4E0D\u662F\u4F53\u79EF\u3002
+  // \u8FD9\u4E00\u884C await \u539F\u672C\u5C31\u5728\u6B22\u8FCE\u6D6E\u5C42/\u9876\u680F\u7684\u6E32\u67D3\u8DEF\u5F84\u4E0A\uFF0C\u4E8E\u662F\uFF1A
+  //   t\u2248100ms  \u6D6E\u5C42\u5F00\u59CB\u51C6\u5907
+  //   t\u2248750ms  pi-lazy \u7684 after-start \u961F\u5217\u8D77\u8DD1\uFF08\u6BCF\u5305 ~0.5-0.9s\uFF0C\u95F4\u9694\u8BA9\u51FA \u2264250ms\uFF0C\u6700\u540E\u4E00\u5305 ~6s\uFF09
+  //   t\u22488s     \u4E0A\u9762\u90A3\u4E2A open \u624D\u8FD4\u56DE \u2192 \u961F\u5217\u65E9\u8DD1\u5B8C\u4E86 \u2192 \u6D6E\u5C42\u624D\u753B\u51FA\u6765
+  // \u89C2\u611F\u5C31\u662F\u300C\u61D2\u52A0\u8F7D\u5168\u90E8\u8DD1\u5B8C\uFF0C\u7F8E\u5316\u5F39\u7A97\u624D\u8E66\u51FA\u6765\u300D\u3002
+  //
+  // \u4FEE\u6CD5\uFF1A\u7ED9\u6700\u8FD1\u4F1A\u8BDD\u5217\u8868\u4E00\u4E2A\u5F88\u77ED\u7684\u8D85\u65F6\uFF0C\u8D85\u65F6\u5C31\u7528\u7A7A\u5217\u8868\u5148\u628A UI \u753B\u51FA\u6765\uFF0C\u4E0D\u963B\u585E\u9996\u5E27\uFF1B
+  // \u771F\u6B63\u7684\u5217\u8868\u8FDF\u5230\u65F6\u518D\u8865\u753B\uFF08\u9876\u680F\u91CD\u65B0 setHeader\uFF0C\u6D6E\u5C42 setRecentSessions + requestRender\uFF09\u3002
+  async function getRecentSessionsFast(request: AbortController): Promise<RecentSession[]> {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    try {
+      return await Promise.race([
+        getRecentSessions(3, request.signal),
+        new Promise<RecentSession[]>((resolve) => {
+          timer = setTimeout(() => resolve([]), WELCOME_RECENT_SESSIONS_TIMEOUT_MS);
+        }),
+      ]);
+    } catch {
+      return [];
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+`;
+  const headerLate = `        // [\u672C\u5730\u8865\u4E01] \u4E0A\u9762\u8D85\u65F6\u4E86\u5C31\u5148\u7528\u7A7A\u5217\u8868\u628A\u9876\u680F\u753B\u51FA\u6765\uFF0C\u7B49\u771F\u6B63\u7684\u6700\u8FD1\u4F1A\u8BDD\u5230\u4E86\u518D\u8865\u753B\u4E00\u6B21\u3002
+        if (recentSessions.length === 0) {
+          void getRecentSessions(3, request.signal).then((lateSessions) => {
+            if (lateSessions.length === 0 || !welcomeHeaderActive) return;
+            if (!canShowWelcome(ctx, request, generation)) return;
+            ctx.ui.setHeader(() => new WelcomeHeader(
+              modelName,
+              providerName,
+              lateSessions,
+              discoverLoadedCounts(pi.getCommands()),
+              estimateInitialContextTokens(ctx),
+            ));
+          }).catch(() => {});
+        }
+`;
+  const overlayLate = `            // [\u672C\u5730\u8865\u4E01] \u4E0A\u9762\u8D85\u65F6\u4E86\u5C31\u5148\u5F39\u7A7A\u5217\u8868\u7684\u6D6E\u5C42\uFF0C\u7B49\u771F\u6B63\u7684\u6700\u8FD1\u4F1A\u8BDD\u5230\u4E86\u518D\u56DE\u586B\u91CD\u753B\u3002
+            if (recentSessions.length === 0) {
+              void getRecentSessions(3, request.signal).then((lateSessions) => {
+                if (dismissed || lateSessions.length === 0) return;
+                welcome.setRecentSessions(lateSessions);
+                tui.requestRender();
+              }).catch(() => {});
+            }
+`;
+  const plan = [
+    {
+      file: indexFile,
+      src: indexSrc,
+      steps: [
+        [
+          'import { WelcomeComponent, WelcomeHeader, discoverLoadedCounts, getRecentSessions } from "./welcome.ts";\n',
+          'import { WelcomeComponent, WelcomeHeader, discoverLoadedCounts, getRecentSessions, type RecentSession } from "./welcome.ts";\n'
+        ],
+        [
+          "const STASH_PREVIEW_WIDTH = 72;\n",
+          "const STASH_PREVIEW_WIDTH = 72;\n// [\u672C\u5730\u8865\u4E01] \u6B22\u8FCE\u6D6E\u5C42/\u9876\u680F\u7B49\u6700\u8FD1\u4F1A\u8BDD\u5217\u8868\u7684\u4E0A\u9650\uFF1B\u8D85\u65F6\u5148\u753B\u7A7A\u5217\u8868\uFF08\u8BE6\u89C1 getRecentSessionsFast\uFF09\u3002\nconst WELCOME_RECENT_SESSIONS_TIMEOUT_MS = 400;\n"
+        ],
+        ["  function setupWelcomeHeader(ctx: any) {", helper + "  function setupWelcomeHeader(ctx: any) {"],
+        [
+          "        const recentSessions = await getRecentSessions(3, request.signal);\n        if (!canShowWelcome(ctx, request, generation)) return;\n",
+          "        const recentSessions = await getRecentSessionsFast(request);\n        if (!canShowWelcome(ctx, request, generation)) return;\n"
+        ],
+        [
+          "        welcomeHeaderActive = true;\n        ctx.ui.setHeader(() => header);\n",
+          "        welcomeHeaderActive = true;\n        ctx.ui.setHeader(() => header);\n\n" + headerLate
+        ],
+        [
+          "        if (!canShowWelcome(ctx, request, overlaySessionGeneration)) return;\n        const recentSessions = await getRecentSessions(3, request.signal);\n",
+          "        if (!canShowWelcome(ctx, request, overlaySessionGeneration)) return;\n        const recentSessions = await getRecentSessionsFast(request);\n"
+        ],
+        [
+          "            const welcome = new WelcomeComponent(\n              modelName,\n              providerName,\n              recentSessions,\n              loadedCounts,\n              initialContextTokens,\n            );\n",
+          "            const welcome = new WelcomeComponent(\n              modelName,\n              providerName,\n              recentSessions,\n              loadedCounts,\n              initialContextTokens,\n            );\n\n" + overlayLate
+        ]
+      ]
+    },
+    {
+      file: welcomeFile,
+      src: welcomeSrc,
+      steps: [
+        [
+          "  setCountdown(seconds: number): void {\n    this.countdown = seconds;\n  }\n",
+          "  setCountdown(seconds: number): void {\n    this.countdown = seconds;\n  }\n\n  // [\u672C\u5730\u8865\u4E01] \u9996\u5E27\u4E0D\u518D\u7B49 getRecentSessions\uFF08\u89C1 index.ts \u7684 getRecentSessionsFast \u6CE8\u91CA\uFF09\u3002\n  // \u6700\u8FD1\u4F1A\u8BDD\u5217\u8868\u8FDF\u5230\u65F6\uFF0C\u7531 index.ts \u56DE\u586B\u5E76 requestRender\u3002\n  setRecentSessions(sessions: RecentSession[]): void {\n    this.data = { ...this.data, recentSessions: sessions };\n  }\n"
+        ]
+      ]
+    }
+  ];
+  const outs = [];
+  for (const p of plan) {
+    let out = p.src;
+    for (const [anchor, repl] of p.steps) {
+      const hits = out.split(anchor).length - 1;
+      if (hits !== 1) {
+        console.error(`[pi-lazy] pi-powerline-footer \u517C\u5BB9\u8865\u4E01\u8DF3\u8FC7\uFF1A\u951A\u70B9\u672A\u547D\u4E2D\u6216\u91CD\u590D\uFF08${hits} \u6B21\uFF09${JSON.stringify(anchor.slice(0, 60))}`);
+        return;
+      }
+      out = out.replace(anchor, () => repl);
+    }
+    outs.push([p.file, out]);
+  }
+  try {
+    for (const [file, out] of outs) writeFileSync2(file, out);
+  } catch (err) {
+    console.error(`[pi-lazy] pi-powerline-footer \u517C\u5BB9\u8865\u4E01\u5199\u5165\u5931\u8D25: ${err instanceof Error ? err.message : String(err)}`);
+    return;
+  }
+  console.error("[pi-lazy] re-patched pi-powerline-footer for fast welcome (restart to take effect)");
 }
 function recordTiming(rt, label, started) {
   rt.profile.push({ label, ms: performance.now() - started });
@@ -1434,6 +1650,8 @@ function createPiLazy(pi, agentDir = getAgentDir4()) {
     rt.turnActive = false;
     drainResumeWaiters(rt);
     refreshStatus(pi, rt, ctx);
+    ensureManagerCompat(agentDir, rt);
+    ensureFooterCompat(agentDir, rt);
     const needsMigrate = [...rt.entries.values()].some(
       (e) => isManagedLazy(e.spec) && !e.moduleLazyReady
     );
@@ -1461,9 +1679,9 @@ function createPiLazy(pi, agentDir = getAgentDir4()) {
     drainResumeWaiters(rt);
   });
   pi.registerCommand("lazy", {
-    description: "LazyVim-style extension manager (list|load|migrate|auto|init|status)",
+    description: "LazyVim-style extension manager (list|load|migrate|auto|init|status|doctor)",
     getArgumentCompletions: (prefix) => {
-      const sub = ["status", "list", "load", "migrate", "auto", "init", "config", "profile"];
+      const sub = ["status", "list", "load", "migrate", "auto", "init", "config", "profile", "doctor"];
       const names = [...rt.entries.keys()].map((n) => `load ${n}`);
       const items = [...sub, ...names, "auto on", "auto off"].map((v) => ({ value: v, label: v }));
       const filtered = items.filter((i) => i.value.startsWith(prefix) || i.value.includes(prefix));
@@ -1554,7 +1772,11 @@ Reload or restart Pi to apply it.`, "info");
         refreshStatus(pi, rt, ctx);
         return;
       }
-      if (sub === "load") {
+      if (sub === "doctor") {
+        ctx.ui.notify(runDoctor(agentDir, rt).join("\n"), "info");
+        return;
+      }
+      if (sub === "load" || sub === "l") {
         const name = rest.join(" ").trim();
         if (!name) {
           ctx.ui.notify("usage: /lazy load <name>", "warning");
