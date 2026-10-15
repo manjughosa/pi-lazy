@@ -1,10 +1,10 @@
 {
   "name": "pi-lazy",
   "version": "0.6.0",
-  "description": "LazyVim-style extension manager for Pi Coding Agent — community-maintained fork of @rahularya01/pi-lazy with compat layers, doctor, and maintainer patches.",
-  "author": "Rahul Arya",
+  "description": "LazyVim-style extension manager for Pi Coding Agent — community-maintained continuation of @rahularya01/pi-lazy (original author: Rahul Arya) with compat layers, doctor, and maintainer patches.",
+  "author": "Rahul Arya (original author of @rahularya01/pi-lazy)",
   "contributors": [
-    "Manjūṣaka (fork maintainer)"
+    "manjughosa (fork maintainer — continues Rahul Arya's work; not the original author)"
   ],
   "license": "MIT",
   "type": "module",

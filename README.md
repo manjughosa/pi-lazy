@@ -1,16 +1,18 @@
-# pi-lazy (maintained fork)
+# pi-lazy (maintained continuation)
 
-[![npm version](https://img.shields.io/npm/v/@rahularya01/pi-lazy?logo=npm)](https://www.npmjs.com/package/@rahularya01/pi-lazy)
-[![fork status](https://img.shields.io/badge/fork%20status-maintained-brightgreen)](https://github.com/manjughosa/pi-lazy)
+[![npm version](https://img.shields.io/npm/v/pi-lazy?logo=npm)](https://www.npmjs.com/package/pi-lazy)
+[![fork status](https://img.shields.io/badge/maintained-continuation-brightgreen)](https://github.com/manjughosa/pi-lazy)
 [![upstream last commit](https://img.shields.io/github/last-commit/Rahularya01/pi-lazy?label=upstream%20last%20commit)](https://github.com/Rahularya01/pi-lazy)
-[![license](https://img.shields.io/npm/l/@rahularya01/pi-lazy)](LICENSE)
+[![license](https://img.shields.io/npm/l/pi-lazy)](LICENSE)
 
 **A LazyVim-style extension manager for [Pi Coding Agent](https://github.com/badlogic/pi-mono).**
 
-> **This is a maintained fork.** Upstream `@rahularya01/pi-lazy` v0.3.1 (commit `fd4910a`,
-> 2026-08-27) has not received a new commit in over two months and the issue queue is piling up.
-> See [Why a fork?](#why-a-fork) and [CHANGELOG.md](CHANGELOG.md) for what this fork adds and how
-> patches flow back.
+> **This is not the original project.** pi-lazy was written by **Rahul Arya** and published as
+> `@rahularya01/pi-lazy`. The maintainer of this repository is **not the original author** — this is
+> a continuation, picking up a project whose upstream stopped at v0.3.1 (commit `fd4910a`,
+> 2026-08-27) with a growing issue queue. Credit for the design and the original implementation
+> belongs to Rahul Arya. See [Why a fork?](#why-a-fork) and [CHANGELOG.md](CHANGELOG.md) for what
+> this continuation adds and how patches flow.
 
 If you've used [LazyVim](https://www.lazyvim.org/), the idea will feel familiar: keep every
 package installed, but only pay the startup cost for the ones you actually use right away.
