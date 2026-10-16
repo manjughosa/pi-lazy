@@ -374,6 +374,13 @@ test -f E:/pi-agent/agent/certs/github-mcp-ca.pem && echo 'CA bundle ✓'   # �
 ### 4.3 lazy_load 工具描述
 去掉已不存在的包名示例（`lens`、`plannotator`、`context-mode`）。
 
+### 4.4 用户数据清洗（2026-10-17，配合 P13/P14）
+
+- `lazy.json`：删除 `subagents`（指向从未安装的 npm:pi-subagents）与盘符为 C 的重复 `pi-lazy` spec（junction 双拼写产物）→ 16 specs
+- `lazy-snapshots/*.json` 四份（mini / rainbow / robot / susu）：各删 `subagents` + `pi-workspace-history`（包已卸载）→ 19→17 specs；**cmd 配置一律未动**
+- 备份：`lazy.json.bak.fixAB-*`、`lazy-snapshots/*.bak.clean-*`
+- 以后 restore 存档前无需再手动剔死条目；新空白 init 由 P13 保证不再预置死模板
+
 ---
 
 ## 五、pi-lazy 之外的配套改动
