@@ -2103,7 +2103,24 @@ async function loadByName(pi, rt, name, ctx, ancestry = []) {
   });
   recordTiming(rt, `load:${entry.spec.name}`, started);
   refreshStatus(pi, rt, ctx ?? rt.sessionCtx);
+  learnCommandsToSpec(rt, entry, result);
   return result;
+}
+function learnCommandsToSpec(rt, entry, result) {
+  try {
+    if (!result.ok || !result.commands?.length) return;
+    const spec = entry.spec;
+    const declared = new Set(spec.cmd ?? []);
+    const missing = [...new Set(result.commands)].filter((c) => !declared.has(c));
+    if (!missing.length) return;
+    const configSpec = rt.config.specs.find((s) => s.name === spec.name);
+    if (!configSpec) return;
+    configSpec.cmd = [...(configSpec.cmd ?? []), ...missing];
+    saveConfig(rt.config);
+    console.error(`[pi-lazy] learned cmd [${missing.join(", ")}] for '${spec.name}' — saved to lazy.json`);
+  } catch (err) {
+    console.error(`[pi-lazy] learn-cmd save failed for '${entry.spec.name}': ${err instanceof Error ? err.message : String(err)}`);
+  }
 }
 function registerStubs(pi, rt) {
   const cmdOwners = /* @__PURE__ */ new Map();

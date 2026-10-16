@@ -1413,7 +1413,31 @@ async function loadByName(
 	recordTiming(rt, `load:${entry.spec.name}`, started);
 
 	refreshStatus(pi, rt, ctx ?? rt.sessionCtx);
+	learnCommandsToSpec(rt, entry, result);
 	return result;
+}
+
+/**
+ * P12 learn-cmd: after a package loads, write any commands it registered
+ * that are missing from its spec.cmd back into lazy.json. Next startup the
+ * stub exists, so the command palette works without a manual /lazy edit.
+ * Best effort — a failure to save never breaks the load itself.
+ */
+function learnCommandsToSpec(rt: Runtime, entry: ResolvedEntry, result: LoadResult) {
+	try {
+		if (!result.ok || !result.commands?.length) return;
+		const spec = entry.spec;
+		const declared = new Set(spec.cmd ?? []);
+		const missing = [...new Set(result.commands)].filter((c) => !declared.has(c));
+		if (!missing.length) return;
+		const configSpec = rt.config.specs.find((s) => s.name === spec.name);
+		if (!configSpec) return;
+		configSpec.cmd = [...(configSpec.cmd ?? []), ...missing];
+		saveConfig(rt.config);
+		console.error(`[pi-lazy] learned cmd [${missing.join(", ")}] for '${spec.name}' — saved to lazy.json`);
+	} catch (err) {
+		console.error(`[pi-lazy] learn-cmd save failed for '${entry.spec.name}': ${err instanceof Error ? err.message : String(err)}`);
+	}
 }
 
 function registerStubs(pi: ExtensionAPI, rt: Runtime) {

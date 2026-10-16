@@ -1,6 +1,6 @@
 # 本地补丁清单（LOCAL-PATCHES）
 
-> **本目录不是原版 pi-lazy。** 这是本地维护的分支，含 **11 处 dist 补丁（P1–P11）+ 2 个外部包补丁（`pi-extmgr` 就地补丁 / `pi-powerline-footer` 自愈补丁）+ 2 处用户配置改动（`lazy.json`、`mcp-adapter.json`）**。
+> **本目录不是原版 pi-lazy。** 这是本地维护的分支，含 **12 处 dist 补丁（P1–P12）+ 2 个外部包补丁（`pi-extmgr` 就地补丁 / `pi-powerline-footer` 自愈补丁）+ 2 处用户配置改动（`lazy.json`、`mcp-adapter.json`）**。
 >
 > - 上游基线：`@rahularya01/pi-lazy` **0.3.1**（repo `Rahularya01/pi-lazy`，分支 `main`，最后 push `2026-08-27`）
 > - 本文件用途：**作者更新后逐条核对** —— 上游已修的 → 跟随上游；未修的 → 把补丁抄回来。
@@ -88,6 +88,7 @@ test -f E:/pi-agent/agent/certs/github-mcp-ca.pem && echo 'CA bundle ✓'   # �
 | P9 | `dist` ← `src/index.ts` | 新增 `ensureManagerCompat()`（自动重打 extmgr 补丁） | ❌ 上游无 |
 | P10 | `dist` ← `src/index.ts` | `refreshStatus` 不再调 `ui.setStatus`（去掉底部重复状态行） | ❌ 上游无 |
 | P11 | `dist` ← `src/index.ts` | 新增 `ensureFooterCompat()`（自动重打 pi-powerline-footer 补丁） | ❌ 上游无 |
+| P12 | `dist` ← `src/index.ts` | 新增 `learnCommandsToSpec()`（加载成功后自动把包注册的命令学回 `lazy.json` 的 `spec.cmd`） | ❌ 上游无 |
 
 > 上游源码是 `src/*.ts`（构建产物 `dist/index.js`）；我们改的是 **bundle 后的 `dist/index.js`**。
 > 抄补丁时可以直接改 dist；若想改源码重建，`package.json` 里的 `scripts.build` 是 esbuild 打包。
@@ -317,6 +318,18 @@ test -f E:/pi-agent/agent/certs/github-mcp-ca.pem && echo 'CA bundle ✓'   # �
 | pi-powerline-footer 未安装 | 静默返回，不抛错 | ✓ |
 
 **⚠️ 改 5.4 的补丁时，必须同步本函数里的嵌入副本**（同 8.5 的坑）。
+
+### P12 · 新增 `learnCommandsToSpec()`（加载后自动学回 cmd）
+
+**为什么**：`/mcp` 在 TUI 按不出来 —— pi-lazy 只给 `spec.cmd` 里声明的命令注册 stub，而现行 `lazy.json` 里 mcp spec 的 `cmd` 字段在历次改动中丢了（快照 susu.json 里还有 `"cmd":["mcp"]`）。每次手补是一次性止血；学回机制让任何包在**任何加载路径**（after-start / cmd 触发 / tool 触发 / keyword 触发）加载成功后，把 tracking Proxy 记到的命令（`entry.loadedCommands`）自动写回对应 spec 的 `cmd`，下次启动 stub 就在。
+
+**位置**：`src/index.ts:1426`（函数定义）；`src/index.ts:1416` 在 `loadByName` 成功路径 `refreshStatus` 之后调用。`dist/index.js:2109`（定义）/ `dist/index.js:2106`（调用）—— src 与 dist 已同步，`tsc --noEmit` 零报错。
+
+**逻辑**：`result.ok` 为假或 `commands` 为空 → return；`spec.cmd` 已含全部命令 → return；`rt.config.specs` 里找不到同名 spec → return；否则合并新命令后 `saveConfig(rt.config)`（走 `getAgentDir()` 默认值）。**best-effort**：save 抛错只打 `console.error`，绝不打断加载本身。
+
+**实测**（逻辑复刻四用例）：缺 cmd 学回 3 条 ✓；已有部分只补缺 ✓；load 失败不写 ✓；spec 不在 config 不写 ✓。
+
+**⚠️ 上游同步注意**：上游没有此功能；若上游日后加了类似机制，优先用上游的，删本条。
 
 ## 四、其它本地改动（不在 dist 里）
 
