@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { LazySpec } from "./types.ts";
@@ -179,7 +179,14 @@ export function normalizeSourceKey(source: string): string {
 	const trimmed = source.trim();
 	const npm = npmPackageName(trimmed);
 	if (npm) return `npm:${trimmed.startsWith("npm:") ? trimmed.slice(4) : trimmed}`;
-	return trimmed;
+	// P14: resolve local paths through junctions/symlinks so two spellings of the
+	// same directory (E:\pi-agent\agent\... vs C:\Users\...\.pi\agent\...) share one
+	// dedup key instead of becoming two specs / two roster entries.
+	try {
+		return realpathSync(trimmed).replace(/[\\\/]+$/, "").toLowerCase();
+	} catch {
+		return trimmed.replace(/[\\\/]+$/, "").toLowerCase();
+	}
 }
 
 export function sourcesMatch(left: string, right: string): boolean {

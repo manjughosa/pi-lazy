@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, sep } from "node:path";
 import test from "node:test";
 import { loadConfig } from "../src/config.ts";
 import { createPiLazy } from "../src/index.ts";
 import { loadResolvedEntry, prefetchEntry } from "../src/loader.ts";
 import { migrateSettings } from "../src/migrate.ts";
-import { isModuleLazyInSettings, resolveExtensionEntries } from "../src/resolve.ts";
+import { isModuleLazyInSettings, normalizeSourceKey, resolveExtensionEntries } from "../src/resolve.ts";
 import type { LazySpec, LoadResult, ResolvedEntry } from "../src/types.ts";
 
 const tempRoots: string[] = [];
@@ -428,4 +428,25 @@ test("init brings every saved snapshot up to the live plugin set", async () => {
 		// p1 was saved by the snapshot itself and must survive untouched.
 		assert.ok(snap.config.specs.some((s: LazySpec) => s.name === "p1"));
 	}
+});
+
+test("P13: defaultConfig ships an empty spec catalog", async () => {
+	const { defaultConfig } = await import("../src/config.ts");
+	const cfg = defaultConfig();
+	assert.deepEqual(cfg.specs, [], "no bundled package may survive a blank init");
+	assert.equal(cfg.defaults?.lazy, true);
+});
+
+test("P14: normalizeSourceKey folds path spellings of one directory", () => {
+	// A junction (C:\Users\<user>\.pi\agent -> E:\pi-agent\agent) makes one directory
+	// appear under two paths; realpath folds them. Tests use realpathSync directly
+	// so the suite passes wherever it runs.
+	const real = realpathSync(tempDir());
+	assert.equal(normalizeSourceKey(real + sep), normalizeSourceKey(real));
+	assert.equal(normalizeSourceKey(real + "/"), normalizeSourceKey(real));
+	// npm sources keep their previous shape entirely
+	assert.equal(normalizeSourceKey("npm:pi-web-access"), "npm:pi-web-access");
+	// missing paths fall back without throwing, deterministically, trailing slashes trimmed
+	const missing = join(real, "definitely-missing");
+	assert.equal(normalizeSourceKey(missing + "/"), normalizeSourceKey(missing));
 });

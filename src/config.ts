@@ -46,50 +46,7 @@ export function defaultConfig(): LazyConfig {
 		afterStartPrefetch: true,
 		managerCompat: true,
 		footerCompat: true,
-		specs: [
-			// VeryLazy — common after UI is up
-			{
-				name: "subagents",
-				source: "npm:pi-subagents",
-				lazy: "after-start",
-				priority: 10,
-				description: "Subagent orchestration",
-			},
-			{
-				name: "todo",
-				source: "npm:@juicesharp/rpiv-todo",
-				lazy: "after-start",
-				priority: 20,
-				cmd: ["todo"],
-				tools: ["todo"],
-			},
-			{
-				name: "ask-user",
-				source: "npm:@juicesharp/rpiv-ask-user-question",
-				lazy: "after-start",
-				priority: 20,
-				tools: ["ask_user_question"],
-			},
-
-			// On-demand — heavy / situational
-			{
-				name: "web",
-				source: "npm:pi-web-access",
-				lazy: true,
-				cmd: ["web"],
-				tools: ["web_search", "fetch_content", "get_search_content"],
-				keywords: ["web search", "search the web", "fetch url", "youtube"],
-				description: "Web search / fetch / video",
-			},
-			{
-				name: "mcp",
-				source: "npm:pi-mcp-adapter",
-				lazy: true,
-				cmd: ["mcp"],
-				keywords: ["mcp", "playwright", "clickup"],
-				description: "MCP server bridge",
-			},
-		],
+		specs: [],
 	};
 }
 

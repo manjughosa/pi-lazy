@@ -39,49 +39,7 @@ function defaultConfig() {
     afterStartPrefetch: true,
     managerCompat: true,
     footerCompat: true,
-    specs: [
-      // VeryLazy — common after UI is up
-      {
-        name: "subagents",
-        source: "npm:pi-subagents",
-        lazy: "after-start",
-        priority: 10,
-        description: "Subagent orchestration"
-      },
-      {
-        name: "todo",
-        source: "npm:@juicesharp/rpiv-todo",
-        lazy: "after-start",
-        priority: 20,
-        cmd: ["todo"],
-        tools: ["todo"]
-      },
-      {
-        name: "ask-user",
-        source: "npm:@juicesharp/rpiv-ask-user-question",
-        lazy: "after-start",
-        priority: 20,
-        tools: ["ask_user_question"]
-      },
-      // On-demand — heavy / situational
-      {
-        name: "web",
-        source: "npm:pi-web-access",
-        lazy: true,
-        cmd: ["web"],
-        tools: ["web_search", "fetch_content", "get_search_content"],
-        keywords: ["web search", "search the web", "fetch url", "youtube"],
-        description: "Web search / fetch / video"
-      },
-      {
-        name: "mcp",
-        source: "npm:pi-mcp-adapter",
-        lazy: true,
-        cmd: ["mcp"],
-        keywords: ["mcp", "playwright", "clickup"],
-        description: "MCP server bridge"
-      }
-    ]
+    specs: []
   };
 }
 function normalizeMode(value, fallback = true) {
@@ -724,7 +682,7 @@ import { copyFileSync, existsSync as existsSync4, readFileSync as readFileSync4 
 import { getAgentDir as getAgentDir3 } from "@earendil-works/pi-coding-agent";
 
 // src/resolve.ts
-import { existsSync as existsSync3, readdirSync, readFileSync as readFileSync3, statSync as statSync2 } from "node:fs";
+import { existsSync as existsSync3, readdirSync, readFileSync as readFileSync3, realpathSync as realpathSync2, statSync as statSync2 } from "node:fs";
 import { isAbsolute, join as join3, relative, resolve, sep } from "node:path";
 import { getAgentDir as getAgentDir2 } from "@earendil-works/pi-coding-agent";
 function isRecord2(value) {
@@ -869,7 +827,11 @@ function normalizeSourceKey(source) {
   const trimmed = source.trim();
   const npm = npmPackageName(trimmed);
   if (npm) return `npm:${trimmed.startsWith("npm:") ? trimmed.slice(4) : trimmed}`;
-  return trimmed;
+  try {
+    return realpathSync2(trimmed).replace(/[\\\/]+$/, "").toLowerCase();
+  } catch {
+    return trimmed.replace(/[\\\/]+$/, "").toLowerCase();
+  }
 }
 function sourcesMatch(left, right) {
   const leftNpm = npmPackageIdentity(left);
@@ -2115,9 +2077,9 @@ function learnCommandsToSpec(rt, entry, result) {
     if (!missing.length) return;
     const configSpec = rt.config.specs.find((s) => s.name === spec.name);
     if (!configSpec) return;
-    configSpec.cmd = [...(configSpec.cmd ?? []), ...missing];
+    configSpec.cmd = [...configSpec.cmd ?? [], ...missing];
     saveConfig(rt.config);
-    console.error(`[pi-lazy] learned cmd [${missing.join(", ")}] for '${spec.name}' — saved to lazy.json`);
+    console.error(`[pi-lazy] learned cmd [${missing.join(", ")}] for '${spec.name}' \u2014 saved to lazy.json`);
   } catch (err) {
     console.error(`[pi-lazy] learn-cmd save failed for '${entry.spec.name}': ${err instanceof Error ? err.message : String(err)}`);
   }

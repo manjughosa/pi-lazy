@@ -1,6 +1,6 @@
 # 本地补丁清单（LOCAL-PATCHES）
 
-> **本目录不是原版 pi-lazy。** 这是本地维护的分支，含 **12 处 dist 补丁（P1–P12）+ 2 个外部包补丁（`pi-extmgr` 就地补丁 / `pi-powerline-footer` 自愈补丁）+ 2 处用户配置改动（`lazy.json`、`mcp-adapter.json`）**。
+> **本目录不是原版 pi-lazy。** 这是本地维护的分支，含 **14 处 dist 补丁（P1–P14）+ 2 个外部包补丁（`pi-extmgr` 就地补丁 / `pi-powerline-footer` 自愈补丁）+ 2 处用户配置改动（`lazy.json`、`mcp-adapter.json`）**。
 >
 > - 上游基线：`@rahularya01/pi-lazy` **0.3.1**（repo `Rahularya01/pi-lazy`，分支 `main`，最后 push `2026-08-27`）
 > - 本文件用途：**作者更新后逐条核对** —— 上游已修的 → 跟随上游；未修的 → 把补丁抄回来。
@@ -89,6 +89,8 @@ test -f E:/pi-agent/agent/certs/github-mcp-ca.pem && echo 'CA bundle ✓'   # �
 | P10 | `dist` ← `src/index.ts` | `refreshStatus` 不再调 `ui.setStatus`（去掉底部重复状态行） | ❌ 上游无 |
 | P11 | `dist` ← `src/index.ts` | 新增 `ensureFooterCompat()`（自动重打 pi-powerline-footer 补丁） | ❌ 上游无 |
 | P12 | `dist` ← `src/index.ts` | 新增 `learnCommandsToSpec()`（加载成功后自动把包注册的命令学回 `lazy.json` 的 `spec.cmd`） | ❌ 上游无 |
+| P13 | `dist` ← `src/config.ts` | `defaultConfig()` 出厂模板清空 `specs: []`，不再预置 npm:pi-subagents 等死条目 | ❌ 上游无 |
+| P14 | `dist` ← `src/resolve.ts` | `normalizeSourceKey()` 本地路径走 `realpathSync` 折叠 junction/符号链接 + 剥尾斜杠 + 小写归一 | ❌ 上游无 |
 
 > 上游源码是 `src/*.ts`（构建产物 `dist/index.js`）；我们改的是 **bundle 后的 `dist/index.js`**。
 > 抄补丁时可以直接改 dist；若想改源码重建，`package.json` 里的 `scripts.build` 是 esbuild 打包。
@@ -330,6 +332,29 @@ test -f E:/pi-agent/agent/certs/github-mcp-ca.pem && echo 'CA bundle ✓'   # �
 **实测**（逻辑复刻四用例）：缺 cmd 学回 3 条 ✓；已有部分只补缺 ✓；load 失败不写 ✓；spec 不在 config 不写 ✓。
 
 **⚠️ 上游同步注意**：上游没有此功能；若上游日后加了类似机制，优先用上游的，删本条。
+
+### P13 · 出厂模板清空（`defaultConfig().specs = []`）
+
+**为什么**：上游模板第一条是 `npm:pi-subagents`，本机从未安装该包，但它作为死 spec 每次空白 init 都会复活——after-start 队列每次启动白烧一次 load 失败，P12 也救不了（load 失败不写回，设计如此）。操作员定调：**不需要任何出厂模板，init 见到什么装的就管什么**。
+
+**位置**：`src/config.ts` `defaultConfig()` 末尾 `specs: []`；`dist/index.js` 同步。
+
+**行为**：lazy.json 不存在时落盘空目录而不是预置目录；settings.json 里有什么包，scan 就发现什么（`discoverSpecsFromSettings` / `discoverLocalExtensions`），一个不多。
+
+**实测**：`grep -n "pi-subagents" src/*.ts dist/index.js`（排除 .bak）零命中；模板清空后重跑空白 init 场景 = 下次重启验证。
+
+### P14 · `normalizeSourceKey()` 解析 junction 真实路径
+
+**为什么**：`~/.pi/agent` 是指向 `E:\pi-agent\agent` 的 junction。settings.json 里同一扩展有 E 盘 / C 盘两种拼写（persona-loader / pi-lazy / pi-status-mask 各一对），旧去重键只做 trim + npm 名提取，双拼写不折叠 → 空白 init 给 pi-lazy 建了**两个 spec**（一个 E 一个 C）。两个都 `lazy:false` 时无害，但只要有一个被改成 lazy，同一包会被加载两遍。
+
+**位置**：`src/resolve.ts:181`（函数）；`dist/index.js:868` 同步。
+
+**逻辑**：npm: 前缀路径行为不变；本地路径 `realpathSync` 解析（junction 两拼写折叠为同一真实路径），再剥尾部 `[/\]+`、小写归一；路径不存在时回退为「原样剥尾斜杠+小写」——**不抛错、不稳定漂移**。受益面：scan 去重（discoverSpecsFromSettings / discoverLocalExtensions 的 covered 集合）、buildRoster 去重、sourcesMatch 兜底。
+
+**实测**（抽出 dist 真实函数 eval，五用例全绿）：E/C 双拼写折叠 ✓；不存在路径回退稳定（含尾斜杠变体）✓；npm 路径不受影响 ✓；真实路径尾斜杠/尾反斜杠剥离 ✓。
+
+**已知边界**：`sourcesMatch` 对不存在的 Windows 路径仍大小写敏感（回退键小写、但比较走 normalizeSourceKey 的小写化，两侧都小写，故相等）；若上游引入大小写敏感的 selector 区分，需复查 `.toLowerCase()`。
+
 
 ## 四、其它本地改动（不在 dist 里）
 
