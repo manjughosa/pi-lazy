@@ -1,6 +1,6 @@
 # 本地补丁清单（LOCAL-PATCHES）
 
-> **本目录不是原版 pi-lazy。** 这是本地维护的分支，含 **14 处 dist 补丁（P1–P14）+ 2 个外部包补丁（`pi-extmgr` 就地补丁 / `pi-powerline-footer` 自愈补丁）+ 2 处用户配置改动（`lazy.json`、`mcp-adapter.json`）**。
+> **本目录不是原版 pi-lazy。** 这是本地维护的分支，含 **15 处 dist 补丁（P1–P15）+ 2 个外部包补丁（`pi-extmgr` 就地补丁 / `pi-powerline-footer` 自愈补丁）+ 2 处用户配置改动（`lazy.json`、`mcp-adapter.json`）**。
 >
 > - 上游基线：`@rahularya01/pi-lazy` **0.3.1**（repo `Rahularya01/pi-lazy`，分支 `main`，最后 push `2026-08-27`）
 > - 本文件用途：**作者更新后逐条核对** —— 上游已修的 → 跟随上游；未修的 → 把补丁抄回来。
@@ -91,6 +91,7 @@ test -f E:/pi-agent/agent/certs/github-mcp-ca.pem && echo 'CA bundle ✓'   # �
 | P12 | `dist` ← `src/index.ts` | 新增 `learnCommandsToSpec()`（加载成功后自动把包注册的命令学回 `lazy.json` 的 `spec.cmd`） | ❌ 上游无 |
 | P13 | `dist` ← `src/config.ts` | `defaultConfig()` 出厂模板清空 `specs: []`，不再预置 npm:pi-subagents 等死条目 | ❌ 上游无 |
 | P14 | `dist` ← `src/resolve.ts` | `normalizeSourceKey()` 本地路径走 `realpathSync` 折叠 junction/符号链接 + 剥尾斜杠 + 小写归一 | ❌ 上游无 |
+| P15 | `dist` ← `src/{types,config,index}.ts` | 新增 `bootQuiet` 开关：常规汇报转 `logs/pi-lazy.log`，不弹对话不喷终端；`/lazy quiet on\|off`；真故障永远上报 | ❌ 上游无 |
 
 > 上游源码是 `src/*.ts`（构建产物 `dist/index.js`）；我们改的是 **bundle 后的 `dist/index.js`**。
 > 抄补丁时可以直接改 dist；若想改源码重建，`package.json` 里的 `scripts.build` 是 esbuild 打包。
@@ -355,6 +356,20 @@ test -f E:/pi-agent/agent/certs/github-mcp-ca.pem && echo 'CA bundle ✓'   # �
 
 **已知边界**：`sourcesMatch` 对不存在的 Windows 路径仍大小写敏感（回退键小写、但比较走 normalizeSourceKey 的小写化，两侧都小写，故相等）；若上游引入大小写敏感的 selector 区分，需复查 `.toLowerCase()`。
 
+### P15 · `bootQuiet` 开机静默开关
+
+**为什么**：操作员反馈开机时 persona-loader / pi-lazy 把修改信息渲染进对话框、甚至溢出聊天区。侦查结论：① `ctx.ui.notify` 无论 info/warning/error 全部 addChild 进 chatContainer（interactive-mode.js:2312 查实，不是浮层）；② Pi 不劫持 console.error（grep 零命中），stderr 裸写在 TUI 帧外→视觉溢出。典型刷屏时机 = 新 init 后首次启动，P12 学回对每个包都喊一声。
+
+**位置**：`src/types.ts`（LazyConfig.bootQuiet）；`src/config.ts`（解析：缺字段/垃圾值→true，显式 false→弹窗；defaultConfig 带 `bootQuiet: true`）；`src/index.ts`（`lazyLog()` 助手 + 3 个调用点 + `/lazy quiet on|off`）。
+
+**路由表**：
+- learned cmd（P12 成功学回）→ 静默时进 `logs/pi-lazy.log`，否则照旧 stderr
+- 开机 migrate 待办提示 → 静默时进日志，否则照旧 notify
+- after-start **成功**（本来不弹，维持）/ **失败**（warning，永远弹）
+- 真异常（roster 写失败/解析失败/stub 双认领/补丁失败/加载失败）→ **全部保留原样**，操作员定调：真异常就该看见
+
+**实测**：`npm run build` 重建 dist，`node --check` 通过；bootQuiet 四态探针（默认 true / 显式 false 保留 / 缺字段回退 true / 垃圾值回退 true）全绿；22 项单测全绿。
+
 
 ## 四、其它本地改动（不在 dist 里）
 
@@ -547,6 +562,18 @@ $b64 = [Convert]::ToBase64String($c.RawData, 'InsertLineBreaks')
 **备份**：`mcp.json.bak.githubca.20261015_115224`（改前）→ 后因告警移入 `mcp-adapter.json`；`mcp.json.bak.defermeta.20261015_113702`（settings 键加在 mcp.json 的版本，已废弃）；现 `mcp.json` **不再含** settings / caFile（已清），真正生效的是 `mcp-adapter.json`（备份 `mcp-adapter.json.bak.20261015_120847`）
 
 **自检**：见 8.7。
+
+### 5.6 `persona-loader` 开机静默（P15 配套，无仓库）
+
+- **文件**：`E:\pi-agent\agent\extensions\persona-loader\index.ts`（备份 `index.ts.bak-q-*`）
+- **机制**：`JBState.bootQuiet`（默认 true，旧 state 文件升级即静默）；`plog()` 把常规汇报追加到 `~/.pi/agent/logs/persona-loader.log`；`pnotify()` 按开关分流
+- **转日志**：注入摘要（节数/字节/sha）、探针每轮行、体积红线、判据自检 findings、启动自检常规行
+- **保留弹窗（真故障）**：注入块为空（error）、缺节（warning）、自检失败 st.ok=false（warning）、探针 META/REFUSAL 非 SAFE（warning）
+- **终端**：console.error 三处全部移除，stderr 开机零输出
+- **开关**：`/persona-loader -notify` 切换；`-status` 显示当前态
+- **验证**：`tsc --noEmit` 零错 + `--experimental-strip-types` 解析通过；bootQuiet 缺字段回退 true 已测
+
+---
 
 ## 六、历史踩坑速查（出问题时先看这里）
 

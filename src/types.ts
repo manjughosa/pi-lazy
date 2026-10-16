@@ -64,6 +64,8 @@ export interface LazyConfig {
 	managerCompat?: boolean;
 	/** When false, the pi-powerline-footer fast-welcome compat patch is skipped (default true). */
 	footerCompat?: boolean;
+	/** Routine notices only to log (true, default); false restores chat popups. Failures always surface. */
+	bootQuiet?: boolean;
 	specs: LazySpec[];
 }
 

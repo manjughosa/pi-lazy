@@ -736,6 +736,22 @@ function buildRoster(agentDir: string): Roster {
 	return { version: 1, generatedAt: new Date().toISOString(), all: [...seen.values()] };
 }
 
+/**
+ * Routine notices when bootQuiet is on: append to logs/pi-lazy.log instead of
+ * the terminal. The TUI does not capture stderr, so console.error lands raw on
+ * the screen and smears over the chat frame — the exact symptom bootQuiet
+ * exists to stop. Failures never route here; they keep their notify path.
+ */
+function lazyLog(agentDir: string, line: string): void {
+	try {
+		const dir = join(agentDir, "logs");
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(join(dir, "pi-lazy.log"), `[${new Date().toISOString()}] ${line}\n`, { flag: "a" });
+	} catch {
+		/* log unavailable — a routine notice dying quietly is the accepted cost */
+	}
+}
+
 /** Recompute and persist the roster. Called by `/lazy init`. */
 function refreshRoster(agentDir: string): Roster {
 	const roster = buildRoster(agentDir);
@@ -1434,7 +1450,9 @@ function learnCommandsToSpec(rt: Runtime, entry: ResolvedEntry, result: LoadResu
 		if (!configSpec) return;
 		configSpec.cmd = [...(configSpec.cmd ?? []), ...missing];
 		saveConfig(rt.config);
-		console.error(`[pi-lazy] learned cmd [${missing.join(", ")}] for '${spec.name}' — saved to lazy.json`);
+		const line = `[pi-lazy] learned cmd [${missing.join(", ")}] for '${spec.name}' — saved to lazy.json`;
+		if (rt.config.bootQuiet !== false) lazyLog(getAgentDir(), line);
+		else console.error(line);
 	} catch (err) {
 		console.error(`[pi-lazy] learn-cmd save failed for '${entry.spec.name}': ${err instanceof Error ? err.message : String(err)}`);
 	}
@@ -1735,7 +1753,9 @@ export function createPiLazy(pi: ExtensionAPI, agentDir = getAgentDir()) {
 			(e) => isManagedLazy(e.spec) && !e.moduleLazyReady,
 		);
 		if (needsMigrate && event.reason === "startup") {
-			ctx.ui.notify("pi-lazy: run /lazy migrate then restart for true module-lazy", "info");
+			const line = "pi-lazy: run /lazy migrate then restart for true module-lazy";
+			if (rt.config.bootQuiet !== false) lazyLog(agentDir, line);
+			else ctx.ui.notify(line, "info");
 		}
 
 		rt.afterStartQueued = true;
@@ -1767,9 +1787,9 @@ export function createPiLazy(pi: ExtensionAPI, agentDir = getAgentDir()) {
 	});
 
 	pi.registerCommand("lazy", {
-		description: "LazyVim-style extension manager (list|load|disable|enable|rescue|snapshot|restore|delete|migrate|auto|init|scan|status|doctor)",
+		description: "LazyVim-style extension manager (list|load|disable|enable|rescue|snapshot|restore|delete|migrate|auto|init|scan|status|quiet|doctor)",
 		getArgumentCompletions: (prefix) => {
-			const sub = ["status", "list", "load", "migrate", "auto", "init", "scan", "disable", "enable", "rescue", "restore", "snapshot", "delete", "config", "profile", "doctor"];
+			const sub = ["status", "list", "load", "migrate", "auto", "init", "scan", "disable", "enable", "rescue", "restore", "snapshot", "delete", "config", "quiet", "profile", "doctor"];
 			const items = [...sub, "auto on", "auto off"];
 
 			// `/lazy load <name>` — the runtime catalog. `load` needs a name the loader
@@ -1818,6 +1838,25 @@ export function createPiLazy(pi: ExtensionAPI, agentDir = getAgentDir()) {
 
 			if (sub === "config") {
 				ctx.ui.notify(getLazyConfigPath(agentDir), "info");
+				return;
+			}
+
+			if (sub === "quiet") {
+				const arg = (args ?? "").trim().toLowerCase();
+				if (arg === "on" || arg === "off") {
+					rt.config.bootQuiet = arg === "on";
+					try {
+						saveConfig(rt.config, agentDir);
+						ctx.ui.notify(`lazy bootQuiet ${arg === "on" ? "on (routine notices -> logs/pi-lazy.log)" : "off (notices back in chat)"}`, "info");
+					} catch (err) {
+						ctx.ui.notify(`failed to save config: ${err instanceof Error ? err.message : String(err)}`, "error");
+					}
+					return;
+				}
+				ctx.ui.notify(
+					`lazy bootQuiet is ${rt.config.bootQuiet !== false ? "on" : "off"} (usage: /lazy quiet on|off; failures always surface)`,
+					"info",
+				);
 				return;
 			}
 
@@ -2134,7 +2173,7 @@ export function createPiLazy(pi: ExtensionAPI, agentDir = getAgentDir()) {
 				return;
 			}
 
-			ctx.ui.notify("usage: /lazy [status|list|profile|load <name>|disable <name>|enable <name>|rescue|snapshot <name>|restore <name>|delete <name>|init|scan|migrate|auto on|off|config]", "warning");
+			ctx.ui.notify("usage: /lazy [status|list|profile|load <name>|disable <name>|enable <name>|rescue|snapshot <name>|restore <name>|delete <name>|init|scan|migrate|auto on|off|quiet on|off|config]", "warning");
 		},
 	});
 

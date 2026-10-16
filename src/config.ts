@@ -46,6 +46,7 @@ export function defaultConfig(): LazyConfig {
 		afterStartPrefetch: true,
 		managerCompat: true,
 		footerCompat: true,
+		bootQuiet: true,
 		specs: [],
 	};
 }
@@ -251,6 +252,7 @@ export function loadConfig(agentDir = getAgentDir()): LazyConfig {
 			afterStartPrefetch: normalizeBoolean(raw.afterStartPrefetch, true),
 			managerCompat: raw.managerCompat === true,
 			footerCompat: raw.footerCompat === false ? false : true,
+			bootQuiet: raw.bootQuiet === false ? false : true,
 			specs,
 		};
 	} catch (err) {
