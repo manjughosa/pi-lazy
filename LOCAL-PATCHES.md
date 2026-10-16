@@ -463,10 +463,11 @@ test -f E:/pi-agent/agent/certs/github-mcp-ca.pem && echo 'CA bundle ✓'   # �
 
 ### 5.3 `lazy.json`（用户配置，非补丁）
 
-- 15 条 spec 全部登记；档位 `after-start ×7 / true ×3 / false ×5`
-- 各包补齐 `cmd`/`tools` 存根（命令名从各包源码核实）：`btw`→`/btw`、`plan-mode`→`/plan`、`extmgr`→`/extensions`、`workspace-history`→`/history-status /checkpoint /undo /redo /diff`、`goal-x`→`/goal /goal-list /goal-status`、`subagents`→`/subagents`、`web`→`/websearch /search /web`、`mcp`→`/mcp-auth`、`todo`→tool `todo`、`ask-user`→tool `ask_user_question`
-- `"managerCompat": true`
-- 备份：`lazy.json.bak.*`
+- **2026-10-17 同步定案**（操作员权威配置源 = 桌面 1.json）：18 specs；档位 `after-start ×8（todo/ask-user/web/mcp/superpowers/background-tasks/undo-redo…）/ true ×5（btw/plan-mode/tps-meter/goal-x/adeildo-look）/ false ×5（cache-optimizer/powerline-footer/persona-loader/pi-lazy/themes/status-mask 中的一部分）`，undo-redo pri=50；含 pi-cache-optimizer（+index.ts filter，live 有它 1.json 也有，原样保留）
+- **配置字段（lazy/priority/keywords）以桌面 1.json 为准；数据字段（cmd/description）以 live 探测结果为准**：`cmd` 存根——todo→[todo,todos]、web-access→[websearch,curator,google-account,search]、mcp-adapter→[mcp,mcp-adapter,mcp-auth]、btw→[btw]、plan-mode→[plan]、goal-x→[goal]、powerline-footer→8 命令、background-tasks→11 命令、undo-redo→[redo,undo,undo-cleanup]、persona-loader/pi-lazy/themes→各 1
+- 短名↔包名对应（1.json 用短名，live 用包名）：todo→@juicesharp/rpiv-todo、ask-user→@juicesharp/rpiv-ask-user-question、web→pi-web-access、mcp→pi-mcp-adapter
+- 幕后四存档（mini/rainbow/robot/susu）已同步同一套：18 specs、顶层配置（auto/bootQuiet/queue 参数）与 live 逐字段一致、缺的 cmd/keywords/description 按图索骥补齐；回填前备份 `*.bak.sync-20261017`
+- 历史备份（旧）：`lazy.json.bak.*`；桌面源文件解析修复副本：`C:/Users/32203/Desktop/1.fixed.json`（原 1.json 有尾随逗号，未动原件）
 
 ---
 
