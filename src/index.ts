@@ -22,7 +22,7 @@ import {
 } from "./config.ts";
 import { loadResolvedEntry, prefetchEntry } from "./loader.ts";
 import { migrateSettings } from "./migrate.ts";
-import { isModuleLazyInSettings, resolveSpecPaths, sourcesMatch, findSettingsPackageIndices, discoverSpecsFromSettings, discoverLocalExtensions, normalizeSourceKey, npmPackageName } from "./resolve.ts";
+import { isModuleLazyInSettings, resolveSpecPaths, sourcesMatch, findSettingsPackageIndices, discoverSpecsFromSettings, discoverLocalExtensions, normalizeSourceKey, npmPackageName, resolvePackageRoot, probeStaticCommands } from "./resolve.ts";
 import { performance } from "node:perf_hooks";
 import type { LazyConfig, LazySpec, LoadResult, ResolvedEntry } from "./types.ts";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
@@ -177,7 +177,25 @@ function scanIntoConfig(pi: ExtensionAPI, rt: Runtime, ctx: ExtensionContext, ag
 		(e) => !packages.some((p) => (typeof p === "string" ? p : (p as { source?: unknown })?.source) === e.settingsEntry.source),
 	);
 
-	const next: LazyConfig = { ...existingConfig, specs: [...existingConfig.specs, ...discovered, ...localExts.map((e) => e.spec)] };
+	const mergedSpecs = [...existingConfig.specs, ...discovered, ...localExts.map((e) => e.spec)];
+	// P16 backfill: seed command stubs for any spec that has none, by reading
+	// the package's own source (statically — nothing is executed). Specs that
+	// already carry a cmd are left exactly as the operator curated them.
+	let seeded = 0;
+	for (const spec of mergedSpecs) {
+		if (spec.cmd && spec.cmd.length > 0) continue;
+		try {
+			const root = resolvePackageRoot(spec.source, agentDir);
+			const names = root ? probeStaticCommands(root) : [];
+			if (names.length > 0) {
+				spec.cmd = names;
+				seeded++;
+			}
+		} catch {
+			/* probe is best effort */
+		}
+	}
+	const next: LazyConfig = { ...existingConfig, specs: mergedSpecs };
 
 	let backup = "";
 	if (hadExisting) {
@@ -223,6 +241,7 @@ function scanIntoConfig(pi: ExtensionAPI, rt: Runtime, ctx: ExtensionContext, ag
 		lines.push("left eager (lazy:false) — set lazy:true or after-start by hand to defer them.");
 	}
 	if (settingsWarning) lines.push(settingsWarning);
+	if (seeded > 0) lines.push(`seeded command stubs for ${seeded} spec${seeded === 1 ? "" : "s"} from static source probe.`);
 	return lines;
 }
 

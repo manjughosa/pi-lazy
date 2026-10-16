@@ -90,6 +90,74 @@ function isExtensionFile(name: string): boolean {
 	return name.endsWith(".ts") || name.endsWith(".js") || name.endsWith(".mts") || name.endsWith(".mjs");
 }
 
+const PROBE_MAX_BYTES = 1_500_000;
+// Quote character class shared by the probe patterns (backtick, double, single).
+const QUOTE_CLASS = "[\\x60\"']";
+const REGISTER_CMD_LITERAL_RE = new RegExp(`(?<![\\w$])registerCommand\\s*\\(\\s*${QUOTE_CLASS}([\\w][\\w:.-]{0,79})${QUOTE_CLASS}`, "g");
+// registerCommand(<identifier>, …) — the name comes from a parameter/variable.
+const REGISTER_CMD_VAR_RE = /(?<![\w$])registerCommand\s*\(\s*([A-Za-z_$][\w$]*)\s*[,)]/g;
+
+/**
+ * P16 static-probe: command names a package registers, read out of its entry
+ * source text. Nothing is executed and no import is resolved.
+ *
+ * Two generic shapes are collected (no per-package special cases):
+ *  1. direct literals — registerCommand("foo", …)
+ *  2. wrapper indirection — a local function/arrow whose body passes its own
+ *     first parameter straight into registerCommand, and call sites that pass
+ *     a literal to that wrapper (registerUndo("undo", …) → foo(name) {
+ *     pi.registerCommand(name, …) }). Any wrapper matches, by variable name.
+ * Deep dataflow (renamed vars, computed names) stays invisible; P12 learn-cmd
+ * remains the backstop after a real load.
+ *
+ * Why this exists: init could not know a package's commands before its first
+ * load, P12 only writes cmd after a load, and the usual trigger for that load
+ * is the command stub — so a freshly discovered lazy package had no stub,
+ * typing its command did nothing, and it could never learn its own commands.
+ * Probing at discovery time breaks that cycle for every future package.
+ */
+export function probeStaticCommands(packageRoot: string): string[] {
+	const found = new Set<string>();
+	for (const file of resolveExtensionEntries(packageRoot)) {
+		let text: string;
+		try {
+			if (statSync(file).size > PROBE_MAX_BYTES) continue;
+			text = readFileSync(file, "utf-8");
+		} catch {
+			continue; // unreadable source simply means "no static commands"
+		}
+		collectStaticCommands(text, found);
+	}
+	return [...found].sort();
+}
+
+export function collectStaticCommands(text: string, into: Set<string>): void {
+	for (const m of text.matchAll(REGISTER_CMD_LITERAL_RE)) into.add(m[1]);
+
+	// Wrapper indirection: for each registerCommand(V, …) where V is a bare
+	// identifier, find declarations that take V as their first parameter, then
+	// harvest literal first-arguments from that wrapper's call sites.
+	const declared = new Set<string>();
+	for (const m of text.matchAll(REGISTER_CMD_VAR_RE)) {
+		const v = m[1];
+		if (/^(async|await|function|string|undefined|null|true|false)$/.test(v)) continue;
+		const esc = v.replace(/\$/g, "\\$");
+		const DECL_RES = [
+			new RegExp(`function\\s+([A-Za-z_$][\\w$]*)\\s*\\(\\s*${esc}\\s*[:,)]`, "g"),
+			new RegExp(`(?:const|let|var)\\s+([A-Za-z_$][\\w$]*)\\s*=\\s*(?:async\\s+)?\\(\\s*${esc}\\s*[:,)]`, "g"),
+			new RegExp(`(?:const|let|var)\\s+([A-Za-z_$][\\w$]*)\\s*=\\s*(?:async\\s+)?${esc}\\s*=>`, "g"),
+		];
+		for (const re of DECL_RES) {
+			for (const d of text.matchAll(re)) declared.add(d[1]);
+		}
+	}
+	for (const fn of declared) {
+		const esc = fn.replace(/\$/g, "\\$");
+		const callRe = new RegExp(`(?<![\\w$])${esc}\\s*\\(\\s*${QUOTE_CLASS}([\\w][\\w:.-]{0,79})${QUOTE_CLASS}`, "g");
+		for (const c of text.matchAll(callRe)) into.add(c[1]);
+	}
+}
+
 /**
  * Resolve extension entry files for a package root (mirrors Pi loader rules).
  */
@@ -217,6 +285,16 @@ export function findSettingsPackageIndex(settingsPackages: unknown[], source: st
  * inferring lazy's own `cmd`/`keywords` for an unknown extension would be guesswork.
  * Those keep their current behaviour until the operator writes a spec by hand.
  */
+/** P16 helper: resolve a spec source to its package root, probe, never throw. */
+function probeStaticCommandsForSource(source: string): string[] {
+	try {
+		const root = resolvePackageRoot(source);
+		return root ? probeStaticCommands(root) : [];
+	} catch {
+		return [];
+	}
+}
+
 export function discoverSpecsFromSettings(settingsPackages: unknown[], existing: LazySpec[]): LazySpec[] {
 	const covered = new Set(existing.map((spec) => normalizeSourceKey(spec.source)));
 	const discovered: LazySpec[] = [];
@@ -247,6 +325,10 @@ export function discoverSpecsFromSettings(settingsPackages: unknown[], existing:
 			source,
 			lazy: false,
 			keywords: [specNameFromSource(source)],
+			// P16: seed stubs from a static read of the package source, so a
+			// package flipped to lazy/after-start has command stubs from its
+			// very first session (closes the init↔learn-cmd deadlock).
+			cmd: probeStaticCommandsForSource(source),
 			description: "auto-discovered from settings.json — stays eager; set lazy/after-start by hand to defer it",
 		});
 	});
@@ -326,6 +408,8 @@ export function discoverLocalExtensions(agentDir: string, existing: LazySpec[]):
 				source,
 				lazy: false,
 				keywords: [name],
+				// P16: same static seeding as settings-discovered specs.
+				cmd: probeStaticCommands(dir),
 				description: "local extension under extensions/ — stays eager; set lazy/after-start by hand to defer it",
 			},
 			// Register it as a package so the entrypoint is pinned explicitly, but keep the

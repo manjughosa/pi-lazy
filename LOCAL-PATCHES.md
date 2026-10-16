@@ -1,11 +1,11 @@
 # 本地补丁清单（LOCAL-PATCHES）
 
-> **本目录不是原版 pi-lazy。** 这是本地维护的分支，含 **15 处 dist 补丁（P1–P15）+ 2 个外部包补丁（`pi-extmgr` 就地补丁 / `pi-powerline-footer` 自愈补丁）+ 2 处用户配置改动（`lazy.json`、`mcp-adapter.json`）**。
+> **本目录不是原版 pi-lazy。** 这是本地维护的分支，含 **16 处 dist 补丁（P1–P16）+ 2 个外部包补丁（`pi-extmgr` 就地补丁 / `pi-powerline-footer` 自愈补丁）+ 2 处用户配置改动（`lazy.json`、`mcp-adapter.json`）**。
 >
 > - 上游基线：`@rahularya01/pi-lazy` **0.3.1**（repo `Rahularya01/pi-lazy`，分支 `main`，最后 push `2026-08-27`）
 > - 本文件用途：**作者更新后逐条核对** —— 上游已修的 → 跟随上游；未修的 → 把补丁抄回来。
 > - 位置：`E:\pi-agent\agent\extensions\pi-lazy\`
-> - **最后更新：2026-10-15**
+> - **最后更新：2026-10-17**
 >
 > **环境事实（改文件前先记住这几条）**
 > - pi **1.2.0** / node **v24.20.0** / Windows · Git Bash
@@ -92,6 +92,7 @@ test -f E:/pi-agent/agent/certs/github-mcp-ca.pem && echo 'CA bundle ✓'   # �
 | P13 | `dist` ← `src/config.ts` | `defaultConfig()` 出厂模板清空 `specs: []`，不再预置 npm:pi-subagents 等死条目 | ❌ 上游无 |
 | P14 | `dist` ← `src/resolve.ts` | `normalizeSourceKey()` 本地路径走 `realpathSync` 折叠 junction/符号链接 + 剥尾斜杠 + 小写归一 | ❌ 上游无 |
 | P15 | `dist` ← `src/{types,config,index}.ts` | 新增 `bootQuiet` 开关：常规汇报转 `logs/pi-lazy.log`，不弹对话不喷终端；`/lazy quiet on\|off`；真故障永远上报 | ❌ 上游无 |
+| P16 | `dist` ← `src/{resolve,index}.ts` | 新增静态命令探测：init/scan 从包源码文本直接学出 `spec.cmd`（不执行任何包代码），结掉「新发现包无 stub → 命令不触发首载 → P12 永无机会学」的 init↔learn 死锁 | ❌ 上游无 |
 
 > 上游源码是 `src/*.ts`（构建产物 `dist/index.js`）；我们改的是 **bundle 后的 `dist/index.js`**。
 > 抄补丁时可以直接改 dist；若想改源码重建，`package.json` 里的 `scripts.build` 是 esbuild 打包。
@@ -370,6 +371,16 @@ test -f E:/pi-agent/agent/certs/github-mcp-ca.pem && echo 'CA bundle ✓'   # �
 
 **实测**：`npm run build` 重建 dist，`node --check` 通过；bootQuiet 四态探针（默认 true / 显式 false 保留 / 缺字段回退 true / 垃圾值回退 true）全绿；22 项单测全绿。
 
+
+### P16 · 静态命令探测（`probeStaticCommands`）——结掉 init↔learn 死锁
+
+**为什么**：一个 pending 包被拉起来有四条路（存根 / keyword / after-start 队列 / 手动），但敲 `/命令` 唯一能接它的是**存根**，而存根只从 `spec.cmd` 生成。`/lazy init` 结构上不写 cmd（它不读包、不运行包，不知道包会注册什么）；唯一补漏 P12 `learnCommandsToSpec` 又挂在**加载成功之后**。于是闭环死锁：**没 cmd → 没存根 → 敲命令触发不了首载 → 永远加载不了就永远学不到 cmd**。MCP Adapter 当年、pi-undo-redo 现在都栽在这个洞里。P16 让 init 在发现包的当场**静态读入口源码**提出命令名写进 `spec.cmd`，存根从第一次开机就在场，死锁对所有未来包一次性封死。
+
+**位置**：`src/resolve.ts`（`probeStaticCommands` + `collectStaticCommands` + `QUOTE_CLASS`/两个正则）；两个 discover 函数（`discoverSpecsFromSettings`/`discoverLocalExtensions`）新建 spec 时带 `cmd`；`src/index.ts` `scanIntoConfig` 对**已存在且 cmd 为空**的 spec 回填。
+
+**机制（全通用，无单包特异性）**：只抽两种形状 —— ① 字面量 `registerCommand("foo", …)`；② wrapper 间接（一个函数/箭头把它的**首参**直接传给 registerCommand，调用点传字面量：`registerUndo("undo") → foo(name){pi.registerCommand(name,…)}`，按变量名匹配任意 wrapper）。计算型/重命名深层数据流不可见 → P12 仍是加载后的兵（实测：pi-background-tasks 的 dist bundle 无字面 `registerCommand`，返回空，设想让 P12 兑）。回填只动 `cmd` 缺失/为空的 spec，操作员手工 curate 过的一律不碰。
+
+**实测**：`npm run check`（typecheck+build）绿；`node --test` 23 项全绿（含新增“字面量+两 wrapper 形状”用例）；对全部已装 pi 包跑探测——pi-undo-redo→`redo,undo,undo-cleanup`（与 P12 学到的一致）、pi-mcp-adapter→`mcp,mcp-adapter,mcp-auth`、pi-powerline-footer→8 命令、pi-web-access→4、pi-usage/pi-cache-optimizer/awesome-pi-themes/pi-lazy 各中；lazy.json 实测回填 5 个无 cmd 的 spec。**未验证**：需重启一次真实会话才能确认存根在开机即在场（本会话 dist 已重建但进程仍跑旧代码）。
 
 ## 四、其它本地改动（不在 dist 里）
 

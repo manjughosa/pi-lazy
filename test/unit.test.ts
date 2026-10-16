@@ -7,7 +7,7 @@ import { loadConfig } from "../src/config.ts";
 import { createPiLazy } from "../src/index.ts";
 import { loadResolvedEntry, prefetchEntry } from "../src/loader.ts";
 import { migrateSettings } from "../src/migrate.ts";
-import { isModuleLazyInSettings, normalizeSourceKey, resolveExtensionEntries } from "../src/resolve.ts";
+import { isModuleLazyInSettings, normalizeSourceKey, probeStaticCommands, resolveExtensionEntries } from "../src/resolve.ts";
 import type { LazySpec, LoadResult, ResolvedEntry } from "../src/types.ts";
 
 const tempRoots: string[] = [];
@@ -187,6 +187,29 @@ test("extension resolution ignores traversal and returns deterministic directory
 		"extensions/a.js": "export default () => {}",
 	}, ["../outside.js", "extensions"]);
 	assert.deepEqual(resolveExtensionEntries(root), [join(root, "extensions/a.js"), join(root, "extensions/z.js")]);
+});
+
+test("P16 static probe finds literal and wrapper-indirect commands", () => {
+	const root = tempDir();
+	createPackage(
+		root,
+		{
+			"src/extension.ts": [
+				`export default (pi) => {`,
+				`  pi.registerCommand("direct", { handler: () => {} });`,
+				`  registerUndo("undo", "d");`,
+				`  registerRedo("redo", "d");`,
+				`  function registerUndo(name, description) { pi.registerCommand(name, { description, handler: () => {} }); }`,
+				`  const registerRedo = (name, description) => { pi.registerCommand(name, { description, handler: () => {} }); };`,
+				`  const computed = dynamicName(); pi.registerCommand(computed, { handler: () => {} });`,
+				`}`,
+			].join("\n"),
+		},
+		["./src/extension.ts"],
+	);
+	// direct literal + both wrapper shapes (declaration and arrow const);
+	// computed names stay invisible by design (P12 learn-cmd is the backstop).
+	assert.deepEqual(probeStaticCommands(root), ["direct", "redo", "undo"]);
 });
 
 test("concurrent callers share one factory activation", async () => {

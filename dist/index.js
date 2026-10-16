@@ -755,6 +755,46 @@ function readPiManifest(packageRoot) {
 function isExtensionFile(name) {
   return name.endsWith(".ts") || name.endsWith(".js") || name.endsWith(".mts") || name.endsWith(".mjs");
 }
+var PROBE_MAX_BYTES = 15e5;
+var QUOTE_CLASS = `[\\x60"']`;
+var REGISTER_CMD_LITERAL_RE = new RegExp(`(?<![\\w$])registerCommand\\s*\\(\\s*${QUOTE_CLASS}([\\w][\\w:.-]{0,79})${QUOTE_CLASS}`, "g");
+var REGISTER_CMD_VAR_RE = /(?<![\w$])registerCommand\s*\(\s*([A-Za-z_$][\w$]*)\s*[,)]/g;
+function probeStaticCommands(packageRoot) {
+  const found = /* @__PURE__ */ new Set();
+  for (const file of resolveExtensionEntries(packageRoot)) {
+    let text;
+    try {
+      if (statSync2(file).size > PROBE_MAX_BYTES) continue;
+      text = readFileSync3(file, "utf-8");
+    } catch {
+      continue;
+    }
+    collectStaticCommands(text, found);
+  }
+  return [...found].sort();
+}
+function collectStaticCommands(text, into) {
+  for (const m of text.matchAll(REGISTER_CMD_LITERAL_RE)) into.add(m[1]);
+  const declared = /* @__PURE__ */ new Set();
+  for (const m of text.matchAll(REGISTER_CMD_VAR_RE)) {
+    const v = m[1];
+    if (/^(async|await|function|string|undefined|null|true|false)$/.test(v)) continue;
+    const esc = v.replace(/\$/g, "\\$");
+    const DECL_RES = [
+      new RegExp(`function\\s+([A-Za-z_$][\\w$]*)\\s*\\(\\s*${esc}\\s*[:,)]`, "g"),
+      new RegExp(`(?:const|let|var)\\s+([A-Za-z_$][\\w$]*)\\s*=\\s*(?:async\\s+)?\\(\\s*${esc}\\s*[:,)]`, "g"),
+      new RegExp(`(?:const|let|var)\\s+([A-Za-z_$][\\w$]*)\\s*=\\s*(?:async\\s+)?${esc}\\s*=>`, "g")
+    ];
+    for (const re of DECL_RES) {
+      for (const d of text.matchAll(re)) declared.add(d[1]);
+    }
+  }
+  for (const fn of declared) {
+    const esc = fn.replace(/\$/g, "\\$");
+    const callRe = new RegExp(`(?<![\\w$])${esc}\\s*\\(\\s*${QUOTE_CLASS}([\\w][\\w:.-]{0,79})${QUOTE_CLASS}`, "g");
+    for (const c of text.matchAll(callRe)) into.add(c[1]);
+  }
+}
 function resolveExtensionEntries(packageRoot) {
   const manifest = readPiManifest(packageRoot);
   if (manifest?.extensions?.length) {
@@ -847,6 +887,14 @@ function sourcesMatch(left, right) {
 function findSettingsPackageIndex(settingsPackages, source) {
   return findSettingsPackageIndices(settingsPackages, source)[0] ?? -1;
 }
+function probeStaticCommandsForSource(source) {
+  try {
+    const root = resolvePackageRoot(source);
+    return root ? probeStaticCommands(root) : [];
+  } catch {
+    return [];
+  }
+}
 function discoverSpecsFromSettings(settingsPackages, existing) {
   const covered = new Set(existing.map((spec) => normalizeSourceKey(spec.source)));
   const discovered = [];
@@ -871,6 +919,10 @@ function discoverSpecsFromSettings(settingsPackages, existing) {
       source,
       lazy: false,
       keywords: [specNameFromSource(source)],
+      // P16: seed stubs from a static read of the package source, so a
+      // package flipped to lazy/after-start has command stubs from its
+      // very first session (closes the init↔learn-cmd deadlock).
+      cmd: probeStaticCommandsForSource(source),
       description: "auto-discovered from settings.json \u2014 stays eager; set lazy/after-start by hand to defer it"
     });
   });
@@ -920,6 +972,8 @@ function discoverLocalExtensions(agentDir, existing) {
         source,
         lazy: false,
         keywords: [name],
+        // P16: same static seeding as settings-discovered specs.
+        cmd: probeStaticCommands(dir),
         description: "local extension under extensions/ \u2014 stays eager; set lazy/after-start by hand to defer it"
       },
       // Register it as a package so the entrypoint is pinned explicitly, but keep the
@@ -1172,7 +1226,21 @@ function scanIntoConfig(pi, rt, ctx, agentDir) {
   const localSettingsAdded = localExts.filter(
     (e) => !packages.some((p) => (typeof p === "string" ? p : p?.source) === e.settingsEntry.source)
   );
-  const next = { ...existingConfig, specs: [...existingConfig.specs, ...discovered, ...localExts.map((e) => e.spec)] };
+  const mergedSpecs = [...existingConfig.specs, ...discovered, ...localExts.map((e) => e.spec)];
+  let seeded = 0;
+  for (const spec of mergedSpecs) {
+    if (spec.cmd && spec.cmd.length > 0) continue;
+    try {
+      const root = resolvePackageRoot(spec.source, agentDir);
+      const names = root ? probeStaticCommands(root) : [];
+      if (names.length > 0) {
+        spec.cmd = names;
+        seeded++;
+      }
+    } catch {
+    }
+  }
+  const next = { ...existingConfig, specs: mergedSpecs };
   let backup = "";
   if (hadExisting) {
     const stamp = (/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-");
@@ -1214,6 +1282,7 @@ backup: ${backup}` : ""}`);
     lines.push("left eager (lazy:false) \u2014 set lazy:true or after-start by hand to defer them.");
   }
   if (settingsWarning) lines.push(settingsWarning);
+  if (seeded > 0) lines.push(`seeded command stubs for ${seeded} spec${seeded === 1 ? "" : "s"} from static source probe.`);
   return lines;
 }
 function snapshotDir(agentDir) {
