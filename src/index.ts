@@ -174,7 +174,8 @@ function scanIntoConfig(pi: ExtensionAPI, rt: Runtime, ctx: ExtensionContext, ag
 	// what gives them a filter migrate can rewrite. Both halves are written here.
 	const localExts = discoverLocalExtensions(agentDir, [...existingConfig.specs, ...discovered]);
 	const localSettingsAdded = localExts.filter(
-		(e) => !packages.some((p) => (typeof p === "string" ? p : (p as { source?: unknown })?.source) === e.settingsEntry.source),
+		// realpath-normalized match: extensions/ walk sees C:\ links while specs may record E:\ real paths
+		(e) => !packages.some((p) => sourcesMatch((typeof p === "string" ? p : (p as { source?: unknown })?.source) as string, e.settingsEntry.source)),
 	);
 
 	const mergedSpecs = [...existingConfig.specs, ...discovered, ...localExts.map((e) => e.spec)];

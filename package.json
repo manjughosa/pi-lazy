@@ -1,6 +1,6 @@
 {
   "name": "@zhuyanqi/pi-lazy",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "LazyVim-style extension manager for Pi Coding Agent — community-maintained continuation of @rahularya01/pi-lazy (original author: Rahul Arya) with compat layers, doctor, and maintainer patches.",
   "author": "Rahul Arya (original author of @rahularya01/pi-lazy)",
   "contributors": [

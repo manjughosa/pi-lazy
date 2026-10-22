@@ -876,6 +876,7 @@ function normalizeSourceKey(source) {
   }
 }
 function sourcesMatch(left, right) {
+  if (typeof left !== "string" || typeof right !== "string") return false;
   const leftNpm = npmPackageIdentity(left);
   const rightNpm = npmPackageIdentity(right);
   if (leftNpm || rightNpm) {
@@ -1224,7 +1225,8 @@ function scanIntoConfig(pi, rt, ctx, agentDir) {
   const discovered = discoverSpecsFromSettings(packages, existingConfig.specs);
   const localExts = discoverLocalExtensions(agentDir, [...existingConfig.specs, ...discovered]);
   const localSettingsAdded = localExts.filter(
-    (e) => !packages.some((p) => (typeof p === "string" ? p : p?.source) === e.settingsEntry.source)
+    // realpath-normalized match: extensions/ walk sees C:\ links while specs may record E:\ real paths
+    (e) => !packages.some((p) => sourcesMatch(typeof p === "string" ? p : p?.source, e.settingsEntry.source))
   );
   const mergedSpecs = [...existingConfig.specs, ...discovered, ...localExts.map((e) => e.spec)];
   let seeded = 0;
