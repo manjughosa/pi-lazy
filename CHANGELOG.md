@@ -11,6 +11,45 @@ How to read this file:
 - **Patches (P1–P11)** — the canonical IDs we use across source, dist, and `LOCAL-PATCHES.md`
   for traceability. New patches get the next number; renumbering never happens.
 
+## 0.6.2 — 2026-10-28
+
+### Changed
+
+- **Install docs now name the published package.** The badges, the install-paths table, `pi install`,
+  `pi update` and the `settings.json` sample all pointed at `@manjughosa/pi-lazy`, which was never
+  published. The fork is on npm as **`@zhuyanqi/pi-lazy`**, so the documented registry path is now
+  `pi install npm:@zhuyanqi/pi-lazy`.
+- `package-lock.json` regenerated — it still described `0.4.0`.
+
+### Notes
+
+- No runtime change: `src/` and `dist/index.js` are unchanged from 0.6.1. This release exists so the
+  documented install path matches what is actually on npm.
+
+## 0.6.1 — 2026-10-28
+
+First release published to npm as `@zhuyanqi/pi-lazy@0.6.1`. Everything below had accumulated locally
+since 0.6.0 and is listed here for the first time.
+
+### Added
+
+- **`bootQuiet` (P15)** — keeps routine notices out of the chat frame.
+- **Static command probe (P16)** — seeds `spec.cmd` at init, breaking the init/learn deadlock.
+
+### Changed
+
+- **`migrate` now defers all four resource types, not just `extensions`.**
+- **`init` folds newly discovered packages into every saved snapshot.**
+- Empty default catalog (P13); junction path spellings folded in dedup keys (P14).
+- `learn` writes registered commands back into `spec.cmd` (P12).
+
+### Fixed
+
+- **realpath-normalized dedup (P17)** in the scan/init settings append, plus a `sourcesMatch`
+  non-string guard.
+- Only `dist/index.js` ships — the timestamped backups written beside it during local rebuilds are no
+  longer packed.
+
 ## 0.6.0 — 2026-10-15
 
 ### Added

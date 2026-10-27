@@ -56,6 +56,7 @@ jobs:
         run: |
           set -euo pipefail
           PKG="$(node -p "require('./package.json').version")"
+          NAME="$(node -p "require('./package.json').name")"
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             RAW="${{ inputs.tag }}"
             if [ -z "$RAW" ]; then
@@ -73,7 +74,7 @@ jobs:
             exit 1
           fi
           # Skip if this version is already on npm
-          if npm view "pi-lazy@${PKG}" version >/dev/null 2>&1; then
+          if npm view "${NAME}@${PKG}" version >/dev/null 2>&1; then
             echo "already_published=true" >> "$GITHUB_OUTPUT"
             echo "Version ${PKG} is already on npm — nothing to do"
           else
@@ -81,7 +82,7 @@ jobs:
           fi
           echo "version=${PKG}" >> "$GITHUB_OUTPUT"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-          echo "Publishing candidate pi-lazy@${PKG} (${TAG})"
+          echo "Publishing candidate ${NAME}@${PKG} (${TAG})"
 
       # Authentication is OIDC trusted publishing, not a token. npm CLI 11.5.1+
       # detects the GitHub OIDC environment and mints a short-lived credential, so

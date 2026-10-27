@@ -1,9 +1,9 @@
 # pi-lazy (maintained continuation)
 
-[![npm version](https://img.shields.io/npm/v/pi-lazy?logo=npm)](https://www.npmjs.com/package/pi-lazy)
+[![npm version](https://img.shields.io/npm/v/@zhuyanqi%2Fpi-lazy?logo=npm)](https://www.npmjs.com/package/@zhuyanqi/pi-lazy)
 [![fork status](https://img.shields.io/badge/maintained-continuation-brightgreen)](https://github.com/manjughosa/pi-lazy)
 [![upstream last commit](https://img.shields.io/github/last-commit/Rahularya01/pi-lazy?label=upstream%20last%20commit)](https://github.com/Rahularya01/pi-lazy)
-[![license](https://img.shields.io/npm/l/pi-lazy)](LICENSE)
+[![license](https://img.shields.io/npm/l/@zhuyanqi%2Fpi-lazy)](LICENSE)
 
 **A LazyVim-style extension manager for [Pi Coding Agent](https://github.com/badlogic/pi-mono).**
 
@@ -59,7 +59,7 @@ package still just one command or keyword away.
 | `E:/pi-agent/agent/extensions/pi-lazy` (local dist) | **No** | **Yes — fastest** |
 | `git:github.com/manjughosa/pi-lazy` | Yes (`git fetch` + checkout) | only when you need pin-to-version |
 | `npm:@rahularya01/pi-lazy` | Yes (npm registry) | No — that is the stale upstream |
-| `npm:@manjughosa/pi-lazy` | Yes (npm registry) | only after the fork is republished under a new name |
+| `npm:@zhuyanqi/pi-lazy` | Yes (npm registry) | **Yes — the published fork, `0.6.1` and newer** |
 
 ## Table of contents
 
@@ -90,7 +90,10 @@ package still just one command or keyword away.
 Pick the path that matches your performance budget (see [Install paths and their trade-offs](#install-paths-and-their-trade-offs)):
 
 ```bash
-# local checkout — zero network, fastest startup (recommended)
+# published fork — the normal install for everyone else
+pi install npm:@zhuyanqi/pi-lazy
+
+# local checkout — zero network, fastest startup (when you run it in place)
 pi install /absolute/path/to/pi-lazy
 
 # pin-to-version via this fork's git tag
@@ -104,7 +107,7 @@ Or add it directly to `~/.pi/agent/settings.json`:
 
 ```json
 {
-  "packages": ["npm:@rahularya01/pi-lazy"]
+  "packages": ["npm:@zhuyanqi/pi-lazy"]
 }
 ```
 
@@ -116,7 +119,7 @@ Then restart Pi (or run `/reload`).
 Update it later with:
 
 ```bash
-pi update npm:@rahularya01/pi-lazy
+pi update npm:@zhuyanqi/pi-lazy
 ```
 
 ## First-time setup (required for true lazy loading)
@@ -128,7 +131,7 @@ process:
 ### 1. Install pi-lazy and restart
 
 ```bash
-pi install npm:@rahularya01/pi-lazy
+pi install npm:@zhuyanqi/pi-lazy
 ```
 
 Restart Pi or run `/reload`.
@@ -747,7 +750,7 @@ pi-lazy: run /lazy migrate then restart for true module-lazy
 > Node 20+ at runtime; only running `npm test` locally needs the newer Node.
 
 ```bash
-git clone https://github.com/Rahularya01/pi-lazy
+git clone https://github.com/manjughosa/pi-lazy
 cd pi-lazy
 npm install
 npm test
@@ -776,24 +779,51 @@ Layout:
 
 ## Publish
 
-### This fork (manjughosa/pi-lazy)
+### Published package
 
-Release flow used for 0.4.0 and onwards:
+This repository is published to npm as **`@zhuyanqi/pi-lazy`**:
 
-1. Bump `version` in `package.json` to `X.Y.Z`, mirror that in a new `## [X.Y.Z] — YYYY-MM-DD`
-   section in `CHANGELOG.md` (with a "Diff vs upstream" table when it is a fork release).
-2. Commit on `main` with a message like `release X.Y.Z (fork)`.
-3. Tag must match `package.json` exactly: `git tag -a vX.Y.Z -m "..."`.
-4. Push: `git push origin main --tags`.
+```bash
+pi install npm:@zhuyanqi/pi-lazy    # what users run
+npm view @zhuyanqi/pi-lazy version  # 0.6.2 and newer
+```
 
-GitHub Actions will:
-- Run `npm run typecheck` + `npm test` + `npm run build`.
-- Build a tarball and verify its content.
-- Publish to **npm under `@manjughosa/pi-lazy`** (the new name) — this requires
-  `NPM_TOKEN_FOR_MANJUGHOSA` in repo secrets, separate from the upstream token.
+`@manjughosa/pi-lazy` was never published — no package exists under that name.
 
-> The upstream `@rahularya01/pi-lazy` npm package is **not** touched. If you want to keep using
-> the upstream name, fork the publish workflow and point it at your own npm scope.
+### Release flow (0.6.2 onwards)
+
+1. Bump `version` in `package.json` and add a `## X.Y.Z — YYYY-MM-DD` section to `CHANGELOG.md`.
+2. `npm run check` (typecheck + esbuild bundle), then commit on `main`.
+3. `git tag -a vX.Y.Z -m "..."` — the tag must match `package.json` exactly.
+4. `git push origin main --tags`.
+5. `npm publish --access public` from the repository root.
+
+Publishing needs proof of presence: this account runs `tfa.mode: auth-and-writes`, so a plain
+`npm publish` fails with `EOTP`. Either pass a code from the authenticator (`--otp=<code>`), or use a
+granular access token generated with **Bypass two-factor authentication** enabled and hand it to npm
+through the environment only:
+
+```bash
+$env:NODE_AUTH_TOKEN = "<granular token>"
+npm publish --registry=https://registry.npmjs.org
+```
+
+The registry's staged publishing (default since 2026-09-03) publishes a public `0.0.0-stage`
+placeholder the first time a package name is used; the real version appears a few minutes later. A
+stage that is never approved stays pending — `npx npm@11 stage list` shows pending stages, and
+`npx npm@11 stage approve <stage-id>` (2FA required) publishes one. npm CLI below 11.15.0 has no
+`stage` subcommand, so use `npx npm@11` for those.
+
+### GitHub Actions
+- `.github/workflows/ci.yml` runs typecheck, build and the unit suite on every push.
+- `.github/workflows/publish.yml` publishes on a `v*` tag through **OIDC trusted publishing** — no
+  `NPM_TOKEN` secret exists to create or rotate.
+- Bootstrap caveat: a trusted publisher can only be configured on a package that already exists, so
+  the first release of a new name has to be published by hand (0.6.1 and 0.6.2 were). Afterwards, add
+  this repository and workflow under npmjs.com → package → Settings → Trusted publishing.
+
+> The upstream `@rahularya01/pi-lazy` npm package is **not** touched; this fork publishes under its
+> own scope.
 
 ### Backporting from upstream
 
@@ -803,22 +833,23 @@ When `@rahularya01/pi-lazy` gets a new commit:
 3. Identify the upstream commit range since `fd4910a` (the fork base).
 4. Cherry-pick onto `main`, run `npm test`, then patch-release as `0.5.x`.
 
-### Manual publish (fallback for any of the above)
+### Manual publish (fallback)
 
 ```bash
 npm login
-npm publish --access public
+npm publish --access public     # add --otp=<code> when the account has 2FA
 ```
 
 Then reinstall in Pi:
 
 ```bash
-pi install /absolute/path/to/pi-lazy   # or npm:@manjughosa/pi-lazy once published
+pi install npm:@zhuyanqi/pi-lazy
 ```
 
-### Required CI secret
-- `NPM_TOKEN_FOR_MANJUGHOSA` — npm automation/granular access token with publish rights
-  for `@manjughosa` (the original `NPM_TOKEN` for `@rahularya01` is irrelevant to this fork).
+### Required npm-side setup
+- **Trusted publisher** for `@zhuyanqi/pi-lazy`: add this repository plus `publish.yml` under
+  npmjs.com → package → Settings → Trusted publishing. Until that entry exists, a tag push fails at
+  the publish step and the release has to be published by hand.
 
 ## License
 
