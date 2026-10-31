@@ -1783,6 +1783,76 @@ function disablePackage(agentDir, name) {
     backups
   };
 }
+var SETTABLE_MODES = ["true", "false", "after-start"];
+var MODE_HELP = {
+  true: "load on demand (cmd / tool / keyword / manual)",
+  false: "always load with Pi (eager)",
+  "after-start": "load right after session start"
+};
+function modeText(mode) {
+  return mode === false ? "false (eager)" : mode === "after-start" ? "after-start" : "true (on demand)";
+}
+function effectiveMode(config, spec) {
+  return spec.lazy ?? config.defaults?.lazy ?? true;
+}
+function resolveSpecForSet(config, name) {
+  const exact = config.specs.find((s) => s.name === name);
+  if (exact) return { spec: exact };
+  const bySource = config.specs.find((s) => sourcesMatch(s.source, name));
+  if (bySource) return { spec: bySource };
+  const bySubstring = config.specs.filter((s) => s.name.toLowerCase().includes(name.toLowerCase()));
+  if (bySubstring.length === 1) return { spec: bySubstring[0] };
+  if (bySubstring.length > 1) {
+    return { error: `'${name}' is ambiguous \u2014 matches: ${bySubstring.map((s) => s.name).join(", ")}` };
+  }
+  return { error: `no package named '${name}' in the lazy catalog \u2014 bare /lazy set lists the names` };
+}
+function parseLazyMode(raw) {
+  const v = raw.trim().toLowerCase().replace(/[_\s]+/g, "-");
+  if (v === "true" || v === "on" || v === "lazy") return true;
+  if (v === "false" || v === "off" || v === "eager") return false;
+  if (v === "after-start" || v === "afterstart" || v === "very-lazy" || v === "verylazy") return "after-start";
+  return null;
+}
+function setLazyMode(agentDir, name, mode) {
+  const configPath = getLazyConfigPath(agentDir);
+  const config = loadConfig(agentDir);
+  const resolved = resolveSpecForSet(config, name);
+  if (!resolved.spec) {
+    return { ok: false, error: resolved.error };
+  }
+  const spec = resolved.spec;
+  const previous = effectiveMode(config, spec);
+  if (previous === mode) {
+    return { ok: true, noop: true, name: spec.name, previous, mode };
+  }
+  const stamp = (/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-");
+  let backup;
+  if (existsSync5(configPath)) {
+    backup = `${configPath}.bak.set-${stamp}`;
+    copyFileSync2(configPath, backup);
+  }
+  try {
+    const next = {
+      ...config,
+      specs: config.specs.map((s) => s === spec ? { ...s, lazy: mode } : s)
+    };
+    saveConfig(next, agentDir);
+  } catch (err) {
+    return { ok: false, name: spec.name, previous, mode, backup, error: err instanceof Error ? err.message : String(err) };
+  }
+  const migration = migrateSettings(agentDir);
+  return {
+    ok: true,
+    name: spec.name,
+    previous,
+    mode,
+    migrated: migration.ok ? migration.changed.length : 0,
+    migrateSkipped: migration.ok ? migration.skipped.length : 0,
+    migrateError: migration.ok ? void 0 : migration.error,
+    backup
+  };
+}
 function refreshStatus(pi, rt, ctx) {
   rt.status = formatStatus(rt);
   globalThis.__piLazyStatus = rt.status;
@@ -2435,9 +2505,26 @@ function createPiLazy(pi, agentDir = getAgentDir4()) {
     drainResumeWaiters(rt);
   });
   pi.registerCommand("lazy", {
-    description: "LazyVim-style extension manager (list|load|disable|enable|rescue|snapshot|restore|delete|migrate|auto|init|scan|status|quiet|doctor)",
+    description: "LazyVim-style extension manager (list|load|set|disable|enable|rescue|snapshot|restore|delete|migrate|auto|init|scan|status|quiet|doctor)",
     getArgumentCompletions: (prefix) => {
-      const sub = ["status", "list", "load", "migrate", "auto", "init", "scan", "disable", "enable", "rescue", "restore", "snapshot", "delete", "config", "quiet", "profile", "doctor"];
+      const rawPrefix = (prefix ?? "").trimStart();
+      const [head, arg1, arg2, ...extra] = rawPrefix.split(/\s+/);
+      if ((head ?? "").toLowerCase() === "set" && extra.length === 0) {
+        const config2 = loadConfig(agentDir);
+        if (arg2 === void 0) {
+          const fragment = (arg1 ?? "").toLowerCase();
+          const names = config2.specs.filter((s) => s.name.toLowerCase().includes(fragment)).map((s) => ({
+            value: `set ${s.name} `,
+            label: s.name,
+            description: `now: ${modeText(effectiveMode(config2, s))}`
+          }));
+          return names.length ? names : null;
+        }
+        const modeFragment = (arg2 ?? "").toLowerCase();
+        const modes = SETTABLE_MODES.filter((m) => m.startsWith(modeFragment)).map((m) => ({ value: `set ${arg1} ${m}`, label: m, description: MODE_HELP[m] }));
+        return modes.length ? modes : null;
+      }
+      const sub = ["status", "list", "load", "set", "migrate", "auto", "init", "scan", "disable", "enable", "rescue", "restore", "snapshot", "delete", "config", "quiet", "profile", "doctor"];
       const items = [...sub, "auto on", "auto off"];
       for (const n of rt.entries.keys()) items.push(`load ${n}`);
       const roster = loadRoster(agentDir);
@@ -2729,6 +2816,66 @@ function createPiLazy(pi, agentDir = getAgentDir4()) {
         ctx.ui.notify(lines.join("\n"), "info");
         return;
       }
+      if (sub === "set") {
+        const targetName = (rest[0] ?? "").trim();
+        const modeRaw = rest.slice(1).join(" ").trim();
+        if (!targetName) {
+          const config2 = loadConfig(agentDir);
+          ctx.ui.notify(
+            [
+              "usage: /lazy set <name> true|false|after-start",
+              "",
+              ...config2.specs.map((s) => `  ${s.name.padEnd(28)} ${modeText(effectiveMode(config2, s))}`)
+            ].join("\n"),
+            "info"
+          );
+          return;
+        }
+        if (!modeRaw) {
+          const config2 = loadConfig(agentDir);
+          const resolved = resolveSpecForSet(config2, targetName);
+          if (!resolved.spec) {
+            ctx.ui.notify(resolved.error ?? `no package named '${targetName}'`, "warning");
+            return;
+          }
+          ctx.ui.notify(
+            `${resolved.spec.name}: ${modeText(effectiveMode(config2, resolved.spec))}
+usage: /lazy set ${resolved.spec.name} ${SETTABLE_MODES.join("|")}`,
+            "info"
+          );
+          return;
+        }
+        const mode = parseLazyMode(modeRaw);
+        if (mode === null) {
+          ctx.ui.notify(`unknown mode '${modeRaw}' \u2014 pick one of: ${SETTABLE_MODES.join(", ")}`, "warning");
+          return;
+        }
+        const result = setLazyMode(agentDir, targetName, mode);
+        if (!result.ok) {
+          ctx.ui.notify(`set failed: ${result.error}`, "error");
+          return;
+        }
+        const entry = result.name ? rt.entries.get(result.name) : void 0;
+        if (entry) entry.spec.lazy = mode;
+        rt.restartRequired = true;
+        refreshStatus(pi, rt, ctx);
+        if (result.noop) {
+          ctx.ui.notify(`${result.name} already ${modeText(mode)} \u2014 nothing to do`, "info");
+          return;
+        }
+        const lines = [`${result.name}: ${modeText(result.previous ?? true)} \u2192 ${modeText(mode)}`];
+        lines.push("  lazy.json: spec updated");
+        lines.push(
+          `  migrate: ${(result.migrated ?? 0) > 0 ? `${result.migrated} entr${result.migrated === 1 ? "y" : "ies"} updated` : "nothing to change"}`
+        );
+        if (result.migrateError) lines.push(`  migrate error: ${result.migrateError}`);
+        if (result.backup) lines.push(`  backup: ${result.backup}`);
+        lines.push(
+          mode === false ? "Not in effect yet \u2014 eager loading happens at startup: run /reload (or restart pi)." : "Takes effect on the next session or after /reload."
+        );
+        ctx.ui.notify(lines.join("\n"), "info");
+        return;
+      }
       if (sub === "doctor") {
         ensureManagerCompat(agentDir, rt);
         ctx.ui.notify(runDoctor(agentDir, rt).join("\n"), "info");
@@ -2755,7 +2902,7 @@ function createPiLazy(pi, agentDir = getAgentDir4()) {
         );
         return;
       }
-      ctx.ui.notify("usage: /lazy [status|list|profile|load <name>|disable <name>|enable <name>|rescue|snapshot <name>|restore <name>|delete <name>|init|scan|migrate|auto on|off|quiet on|off|config]", "warning");
+      ctx.ui.notify("usage: /lazy [status|list|profile|load <name>|set <name> true|false|after-start|disable <name>|enable <name>|rescue|snapshot <name>|restore <name>|delete <name>|init|scan|migrate|auto on|off|quiet on|off|config]", "warning");
     }
   });
   pi.registerTool({

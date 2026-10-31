@@ -1,17 +1,17 @@
 # 本地补丁清单（LOCAL-PATCHES）
 
-> **本目录不是原版 pi-lazy。** 这是本地维护的分支，含 **16 处 dist 补丁（P1–P16）+ 2 个外部包补丁（`pi-extmgr` 就地补丁 / `pi-powerline-footer` 自愈补丁）+ 2 处用户配置改动（`lazy.json`、`mcp-adapter.json`）**。
+> **本目录不是原版 pi-lazy。** 这是本地维护的分支，含 **18 处 dist 补丁（P1–P18）+ 2 个外部包补丁（`pi-extmgr` 就地补丁 / `pi-powerline-footer` 自愈补丁）+ 2 处用户配置改动（`lazy.json`、`mcp-adapter.json`）**。
 >
 > - 上游基线：`@rahularya01/pi-lazy` **0.3.1**（repo `Rahularya01/pi-lazy`，分支 `main`，最后 push `2026-08-27`）
 > - 本文件用途：**作者更新后逐条核对** —— 上游已修的 → 跟随上游；未修的 → 把补丁抄回来。
 > - 位置：`E:\pi-agent\agent\extensions\pi-lazy\`
-> - **最后更新：2026-10-17**
+> - **最后更新：2026-11-01**
 >
 > **环境事实（改文件前先记住这几条）**
 > - pi **1.2.0** / node **v24.20.0** / Windows · Git Bash
 > - `C:\Users\32203\.pi\agent` 是指向 `E:\pi-agent\agent` 的 **junction**（inode 相同）→ **两边是同一份文件**，不存在"改错副本"，但也别当两份去改
 > - `dist/index.js` 是 **esbuild bundle**；`src/*.ts` 是上游源码。我们**只改 bundle**（`package.json` 的 `scripts.build` 就是 esbuild）
-> - `README.md` / `CHANGELOG.md` 是**上游原版、未改动** —— 故意不动，保持 `pi update` 的 diff 干净
+> - `README.md` / `CHANGELOG.md` **已独立维护**（fork 特性都写进去了）；早期「上游原版、故意不动」的说法作废 —— 现在跟随 fork 自己的 release 更新
 
 ---
 
@@ -93,6 +93,8 @@ test -f E:/pi-agent/agent/certs/github-mcp-ca.pem && echo 'CA bundle ✓'   # �
 | P14 | `dist` ← `src/resolve.ts` | `normalizeSourceKey()` 本地路径走 `realpathSync` 折叠 junction/符号链接 + 剥尾斜杠 + 小写归一 | ❌ 上游无 |
 | P15 | `dist` ← `src/{types,config,index}.ts` | 新增 `bootQuiet` 开关：常规汇报转 `logs/pi-lazy.log`，不弹对话不喷终端；`/lazy quiet on\|off`；真故障永远上报 | ❌ 上游无 |
 | P16 | `dist` ← `src/{resolve,index}.ts` | 新增静态命令探测：init/scan 从包源码文本直接学出 `spec.cmd`（不执行任何包代码），结掉「新发现包无 stub → 命令不触发首载 → P12 永无机会学」的 init↔learn 死锁 | ❌ 上游无 |
+| P17 | `dist` ← `src/{index,resolve}.ts` | settings 追加前的 `localSettingsAdded` 去重改用 `sourcesMatch`（realpath 归一），修掉 junction 路径（`C:\`）与记录的真实路径（`E:\`）互不相等、重复追加 `settings.packages` 条目；`sourcesMatch` 对非字符串入参兜底不再抛错 | ❌ 上游无 |
+| P18 | `dist` ← `src/index.ts` | 新增 `/lazy set <name> true\|false\|after-start`：变更单个 spec 的 `lazy` 字段 + 备份 `lazy.json` + `migrate` 对齐 settings + 就地刷新状态；名字/模式两级 Tab 补全；歧义子串拒绝而非静默取首个 | ❌ 上游无 |
 
 > 上游源码是 `src/*.ts`（构建产物 `dist/index.js`）；我们改的是 **bundle 后的 `dist/index.js`**。
 > 抄补丁时可以直接改 dist；若想改源码重建，`package.json` 里的 `scripts.build` 是 esbuild 打包。
@@ -382,16 +384,33 @@ test -f E:/pi-agent/agent/certs/github-mcp-ca.pem && echo 'CA bundle ✓'   # �
 
 **实测**：`npm run check`（typecheck+build）绿；`node --test` 23 项全绿（含新增“字面量+两 wrapper 形状”用例）；对全部已装 pi 包跑探测——pi-undo-redo→`redo,undo,undo-cleanup`（与 P12 学到的一致）、pi-mcp-adapter→`mcp,mcp-adapter,mcp-auth`、pi-powerline-footer→8 命令、pi-web-access→4、pi-usage/pi-cache-optimizer/awesome-pi-themes/pi-lazy 各中；lazy.json 实测回填 5 个无 cmd 的 spec。**未验证**：需重启一次真实会话才能确认存根在开机即在场（本会话 dist 已重建但进程仍跑旧代码）。
 
+### P17 · `sourcesMatch` 归一化去重（junction 路径不再重复追加）
+
+**为什么**：`scan`/`init` 追加 `settings.packages` 前的去重用的是严格相等。而 `C:\Users\32203\.pi\agent` 是指向 `E:\pi-agent\agent` 的 junction：同一次 init 里从 settings 读到的路径拼法和记录里的真实路径拼法不同 → 相等判断落空 → 同一个包被追加第二条。`sourcesMatch` 是 P14 `normalizeSourceKey` 的唯一入口，所以修在它身上。
+
+**位置**：`src/index.ts`（`scanIntoConfig` 的 `localSettingsAdded` 过滤改用 `sourcesMatch`）；`src/resolve.ts`（`sourcesMatch` 对非字符串入参兑底，`entry?.source` 为 undefined 时不再在 `npmPackageName` 里抛）。
+
+**实测**：`npm run check` 绿；单测 23 项全绿。对应 commit `3cde8ae`。
+
+### P18 · `/lazy set` —— 不再手改 `lazy.json` 切模式
+
+**为什么**：`lazy` 字段是三种模式（`true` / `false` / `"after-start"`）的唯一开关，但之前只能手改 `lazy.json` 再跑 `/lazy migrate`，或整套方案 `snapshot`/`restore` 切换。前者要求记得 migrate + 重启，后者粒度太粗。`/lazy enable|disable` 解决的是「在不在方案里」，不是「什么时候加载」。
+
+**位置**：`src/index.ts` —— `SETTABLE_MODES` / `MODE_HELP` / `modeText` / `effectiveMode` / `resolveSpecForSet` / `parseLazyMode` / `setLazyMode`，`registerCommand("lazy")` 的 `set` 分支与两级 `getArgumentCompletions`，`description` 和末尾 usage 串；`README.md`、`CHANGELOG.md` 同步。
+
+**机制**：找到 spec → 已是该值则 noop（不写盘）→ 备份 `lazy.json.bak.set-<stamp>` → `saveConfig` 只改那一个 spec 的 `lazy`（`defaults.lazy` 与其余 spec 不动）→ `migrateSettings` → 就地改进程中那份 `ResolvedEntry.spec.lazy` 并 `refreshStatus`，状态表不用重启就是真的。名字三档解析（精确名 → `source` 后缀 → 子串），但**子串命中多个时拒绝并列出候选**（`'pi' is ambiguous — matches: …`）—— 这是写入语义，静默取第一个等于改错包。补全两级：第一级候选带尾随空格，选中即把光标推到第二级；名字来自 `lazy.json`，模式写死三个并带一行说明。
+
+**实测**：`npm run check` 绿；`npm run test` 23/23 绿；隔离沙箱（`createPiLazy(pi, tmpDir)`）下验过：22 个 spec 全量补全、`set pi-` 前缀过滤 15 个、`set <name>` 第二级 3 个模式、`a`/`f` 前缀过滤、`after-start`/`afterstart`/`false`/`true` 四种写法落盘正确、noop 不写盘、`set pi true` 报歧义、`set nope true` 报不存在、`set <name>` 不带模式只显示当前值、改完 `priority`/`description`/`keywords` 字段完整保留。**未验证**：真实 TUI 里 Tab 选中的视觉行为（已在重启后的会话中由操作员确认 `set` 出现）。
+
 ## 四、其它本地改动（不在 dist 里）
 
-### 4.1 `package.json` 本地化
+### 4.1 `package.json` 本地化 → 后来改回可发布
 ```json
-"name": "pi-lazy",          // 原 @rahularya01/pi-lazy
-"private": true,
-// 删除 publishConfig
-// description 追加 " (local copy in extensions/pi-lazy)"
+"name": "@zhuyanqi/pi-lazy",          // 上游 @rahularya01/pi-lazy
+"publishConfig": { "access": "public" },
+// "private": true 已删除
 ```
-**原因**：本地扩展，不发布。
+**历史**：早期定调「本地扩展，不发布」→ 设过 `private: true` 并删掉 `publishConfig`。0.6.1 起 fork 以自己的名字发布到 npm，上述两处已撤销。**当前事实**：`npm view @zhuyanqi/pi-lazy versions` 能查到 0.6.1 / 0.6.2 / 0.6.3。
 
 ### 4.2 注册方式（重要，别再犯）
 - pi-lazy **只**通过 `extensions/` 目录自动发现加载（`resolveExtensionEntries` 读 `package.json` 的 `pi.extensions`）

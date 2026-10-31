@@ -11,6 +11,30 @@ How to read this file:
 - **Patches (P1–P11)** — the canonical IDs we use across source, dist, and `LOCAL-PATCHES.md`
   for traceability. New patches get the next number; renumbering never happens.
 
+## 0.6.4 — 2026-11-01
+
+### Added
+
+- **`/lazy set <name> true|false|after-start`** — change one spec's `lazy` mode without opening
+  `lazy.json` by hand. Writes the field, backs up `lazy.json`, runs `migrate` so `settings.packages`
+  agrees, and refreshes `/lazy status` in place. Bare `/lazy set` prints every spec with its current
+  mode. Both arguments complete from Tab: names come from `lazy.json`, modes are `true` / `false` /
+  `after-start`, each with a one-line description.
+- The name resolves like `disable` / `enable` (exact, then `source` suffix, then substring), except
+  that an ambiguous substring is refused and the candidate list printed. `set` mutates state, so
+  silently picking the first match of `pi` would be a data-loss bug, not a convenience.
+- `true` / `on` / `lazy`, `false` / `off` / `eager`, and `after-start` / `afterstart` are accepted
+  spellings. Anything else is rejected with the valid list instead of being coerced.
+
+### Notes
+
+- No change to `lazy.json`'s schema, `defaults.lazy`, or any load-path behaviour — `set` is a writer
+  for the field that was previously edit-only. `0.6.3` was published without a changelog entry; this
+  release carries the `set` command on top of it.
+- `/reload` is not enough to move a package across the `false` boundary: eager loading is decided at
+  boot, and a factory that is already registered cannot be unregistered. Documented in
+  [README → When the new mode lands](README.md#when-the-new-mode-lands).
+
 ## 0.6.2 — 2026-10-28
 
 ### Changed

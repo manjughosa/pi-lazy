@@ -477,6 +477,7 @@ So declare the commands and tools you actually want to trigger a load:
 | `/lazy` or `/lazy status` | Status summary + full table (state, mode, source, timings) |
 | `/lazy list` | Compact one-line-per-spec table |
 | `/lazy load <name>` | Force-load a pending package (name, or unique source suffix) |
+| `/lazy set <name> true\|false\|after-start` | Change one spec's `lazy` mode in `lazy.json`, then migrate. Both the name and the mode complete from tab |
 | `/lazy migrate` | Apply `[]` filters to all four resource types + backup `settings.json` |
 | `/lazy auto` | Show whether keyword/event auto-load is on |
 | `/lazy auto on\|off` | Toggle auto-load and persist to `lazy.json` |
@@ -494,7 +495,7 @@ So declare the commands and tools you actually want to trigger a load:
 | `/lazy config` | Print the absolute path to `lazy.json` |
 | `/lazy profile` | Show in-session catalog, resolution, and load timings |
 
-Tab completion is available for subcommands, `load <name>`, and snapshot names after `restore` / `delete`.
+Tab completion is available for subcommands, `load <name>`, snapshot names after `restore` / `delete`, and both arguments of `set` — package names are read from `lazy.json`, and the mode list is `true` / `false` / `after-start`.
 
 ### Statusline
 
@@ -650,6 +651,58 @@ So the schemes stay in step on *which plugins exist* and differ on *when each on
 direction: running `init` while a smaller scheme is active does not trim the others, because that
 would delete plugins from a snapshot you saved on purpose.
 
+### Change one package's mode
+
+```
+/lazy set <name> true|false|after-start
+```
+
+Writes the `lazy` field of one spec in `lazy.json`, then runs `/lazy migrate` so `settings.packages`
+agrees. Every other spec is left alone, and so is `defaults.lazy`.
+
+```
+/lazy set web after-start     # load right after session start
+/lazy set web true            # back to on-demand
+/lazy set web false           # always load with Pi
+```
+
+The name resolves like `disable` / `enable` do — exact spec name, then `source` suffix, then a
+substring match — with one difference: a substring that fits more than one spec is refused
+(`'pi' is ambiguous — matches: pi-lazy, pi-lsp, …`) instead of silently taking the first hit.
+`set` writes state, so guessing the wrong package is not a recoverable typo.
+
+The modes are the three values `lazy.json` already accepts:
+
+| Mode | Meaning |
+| ---- | ------- |
+| `true` | on-demand — loads on a `cmd` / tool / keyword / event trigger, or `/lazy load` |
+| `after-start` | loads right after `session_start`, ordered by `priority` |
+| `false` | always loads with Pi (eager, not managed) |
+
+`true` / `on` / `lazy` and `false` / `off` / `eager` and `after-start` / `afterstart` are accepted
+spellings; anything else is rejected with the list of valid modes. Setting a spec to the mode it
+already has reports `already <mode> — nothing to do` and writes nothing.
+
+Use `/lazy set` bare to print every spec with its current mode — handy when you do not remember the
+exact name.
+
+### When the new mode lands
+
+`set` updates `lazy.json` and `settings.packages` on the spot and keeps `/lazy status` honest, but the
+factories of the current process are not re-negotiated:
+
+| Change | When it takes effect |
+| ------ | -------------------- |
+| `true` ⇄ `after-start` | Next session — the after-start queue is built at `session_start` |
+| anything → `false` | Restart — eager loading is decided while Pi boots |
+| `false` → `true` / `after-start` | Restart — the factory is already registered in this process |
+
+`/reload` is enough for the settings side, not for the module side. This is the same limit `/lazy
+disable` runs into: a loaded extension factory has no inverse operation.
+
+`set` is not `disable`. `set` decides *when* a catalog member loads; `disable` decides whether it is
+a member at all.
+
 ### Drop a package from the scheme
 
 ```
@@ -785,7 +838,7 @@ This repository is published to npm as **`@zhuyanqi/pi-lazy`**:
 
 ```bash
 pi install npm:@zhuyanqi/pi-lazy    # what users run
-npm view @zhuyanqi/pi-lazy version  # 0.6.2 and newer
+npm view @zhuyanqi/pi-lazy version  # 0.6.4 and newer
 ```
 
 `@manjughosa/pi-lazy` was never published — no package exists under that name.
