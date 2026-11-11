@@ -2,6 +2,8 @@
 
 [![npm version](https://img.shields.io/npm/v/@zhuyanqi%2Fpi-lazy?logo=npm)](https://www.npmjs.com/package/@zhuyanqi/pi-lazy)
 [![fork status](https://img.shields.io/badge/maintained-continuation-brightgreen)](https://github.com/manjughosa/pi-lazy)
+[![fork last commit](https://img.shields.io/github/last-commit/manjughosa/pi-lazy?label=fork%20last%20commit)](https://github.com/manjughosa/pi-lazy/commits/main)
+[![CI](https://github.com/manjughosa/pi-lazy/actions/workflows/ci.yml/badge.svg)](https://github.com/manjughosa/pi-lazy/actions/workflows/ci.yml)
 [![upstream last commit](https://img.shields.io/github/last-commit/Rahularya01/pi-lazy?label=upstream%20last%20commit)](https://github.com/Rahularya01/pi-lazy)
 [![license](https://img.shields.io/npm/l/@zhuyanqi%2Fpi-lazy)](LICENSE)
 
@@ -31,9 +33,9 @@ package still just one command or keyword away.
 | Compatibility with `pi-extmgr` | breaks lazy semantics | `ensureManagerCompat` auto-patches on session_start |
 | Compatibility with `pi-powerline-footer` | clobbers the status line twice | `ensureFooterCompat` auto-patches the fast-welcome path |
 | Doctor / diagnostic | absent | `/lazy doctor` checks settings, lazy state, extmgr conflicts |
-| `auto: true` default | yes (loaded eagerly on session start) | no (`auto: false`; opt-in per spec) |
+| Keyword/event auto-load default | on | off in new configs (`auto: false`; enable with `/lazy auto on`) |
 | Typebox collision warning | yes (duplicate Host-provided instance) | peer-dependency only, no collision |
-| Built-in default config | ships 5 ghost package entries | trimmed to the 5 that actually exist |
+| Built-in default config | pre-populated package catalog | empty catalog; `/lazy init` discovers your installed packages |
 
 ### Maintenance policy
 
@@ -45,8 +47,8 @@ package still just one command or keyword away.
   so a change and its commit are never two steps apart. This repo previously had to be kept in sync
   with a separate `pi-lazy-fork/` copy; that duplicate is gone.
 - **Backports from upstream** — if the original `@rahularya01/pi-lazy` repo gets a new commit,
-  it's cherry-picked into the next `0.5.x` patch release.
-- **Releases are tagged** — every release is a signed `vX.Y.Z` git tag on `main`; install via
+  it's reviewed for inclusion in a compatible patch release.
+- **Releases are tagged** — every release has a `vX.Y.Z` git tag on `main`; install via
   `git:github.com/manjughosa/pi-lazy` if you want pin-to-version behavior, or stay on the local
   `dist/index.js` for zero-network startup (recommended for performance — see [Install](#install)).
 - **No silent breaking changes** — see the [CHANGELOG](CHANGELOG.md). Every release notes which
@@ -81,7 +83,7 @@ package still just one command or keyword away.
 
 ## Requirements
 
-- [Pi Coding Agent](https://pi.dev) **0.80+** (peer: `@earendil-works/pi-coding-agent`)
+- [Pi Coding Agent](https://pi.dev) **0.81.1+** (peer: `@earendil-works/pi-coding-agent`)
 - Node.js **20+**
 - Packages you want to defer must already be installed via `pi install` / `settings.packages`
 
@@ -138,9 +140,11 @@ Restart Pi or run `/reload`.
 
 ### 2. Seed and review your config
 
-On first run, pi-lazy writes a default catalog to `~/.pi/agent/lazy.json`.
+On first run, pi-lazy writes `~/.pi/agent/lazy.json` with an **empty catalog** and keyword/event
+auto-load turned off. No example packages are added to your setup.
 
-Edit that file to match **your** installed packages — see [Configuration](#configuration) below.
+Discover your installed packages with `/lazy init`, then choose their load modes — see
+[Configuration](#configuration) below.
 
 To have the catalog pick up packages automatically, run:
 
@@ -160,8 +164,16 @@ To only merge, without touching `settings.json`, use `/lazy scan`.
 
 Newly discovered packages are added as `lazy: false` (**eager**) with a `keywords` entry derived from
 the package name, and local extensions under `extensions/` are registered the same way. Discovery
-records what is installed; it does not decide when anything loads. Set `lazy: true` or `after-start`
-by hand to defer a package.
+records what is installed; it does not decide when anything loads. Choose a deferred mode with:
+
+```text
+/lazy set web true          # on demand
+/lazy set subagents after-start
+```
+
+Use names from `/lazy list`. `set` also runs migrate, so you can proceed to the restart step below.
+If you want keyword or event triggers, enable them with `/lazy auto on`; command/tool triggers do
+not require it. Alternatively, edit `lazy.json` by hand and run `/lazy migrate`.
 
 Only list packages you actually have installed — specs for missing packages will show up as
 errors when you try to load them.
@@ -178,20 +190,29 @@ step. Run `/lazy migrate` on its own only when you changed `lazy.json` by hand.
 This command:
 
 1. Backs up `~/.pi/agent/settings.json` to `settings.json.bak.lazy-<timestamp>`
-2. Rewrites managed (`lazy !== false`) packages from a plain string:
+2. Rewrites registered managed (`lazy !== false`) packages from a plain string, unless an
+   existing resource filter carries an exclusion:
 
    ```json
    "npm:pi-web-access"
    ```
 
-   into an object with an empty extension filter:
+   into an object with empty filters for all four resource types:
 
    ```json
-   { "source": "npm:pi-web-access", "extensions": [] }
+   {
+     "source": "npm:pi-web-access",
+     "extensions": [],
+     "skills": [],
+     "prompts": [],
+     "themes": []
+   }
    ```
 
-The package stays installed — its skills and prompts can still load — but Pi will **not** execute
-its extension factory at startup. pi-lazy takes over and loads that factory later, on your terms.
+The package stays installed, but Pi loads **none of its declared extensions, skills, prompts or
+themes** through settings at startup. pi-lazy loads the extension factory later, on your terms.
+Static skills, prompts and themes are not automatically restored when that factory loads; an extension
+can separately publish resources through `resources_discover` (see [Limits](#limits-v1)).
 
 Eager specs (`"lazy": false`) that were previously filtered empty are restored to plain string
 form automatically when it's safe to do so.
@@ -205,8 +226,8 @@ running:
 /lazy
 ```
 
-should show your managed on-demand packages as `pending`, not `eager`. The statusline will show
-something like `lazy 0↑ 4· 3⚡`.
+should show your managed on-demand packages as `pending`, not `eager`. A compatible status widget
+can also show a summary such as `lazy 0↑ 4· 3⚡` (see [Statusline](#statusline)).
 
 > If you skip the migrate step, packages stay eager — Pi loads them normally, and `/lazy load`
 > will just tell you to migrate and restart.
@@ -273,7 +294,9 @@ Keyword and event auto-load can be toggled on or off:
 /lazy auto on
 ```
 
-It's **on** by default (`"auto": true` in `lazy.json`).
+It's **off in newly created configs** (`"auto": false`). Use `/lazy auto on` to enable keyword
+and event triggers. Manual loads, command/tool stubs, shortcuts and `after-start` do not depend on
+this switch. For compatibility, an existing config that omits `auto` still treats it as on.
 
 ### Dependencies
 
@@ -296,11 +319,12 @@ requests for the same package share a single load.
 
 Everything lives in one file: **`~/.pi/agent/lazy.json`**
 
-- Auto-created on first run from built-in defaults
+- Auto-created on first run with an empty catalog and `auto: false`
 - Merge new packages from `settings.json` with `/lazy init` (or `/lazy scan` for the catalog only) — existing specs are never overwritten
 - Show its path anytime with `/lazy config`
 
-Here's a full example (also in [`examples/lazy.json`](./examples/lazy.json)):
+Here's a configuration example (a larger catalog is in [`examples/lazy.json`](./examples/lazy.json)).
+This example explicitly enables keyword/event auto-load; new configs leave it off:
 
 ```json
 {
@@ -355,7 +379,7 @@ Here's a full example (also in [`examples/lazy.json`](./examples/lazy.json)):
 | ----- | ---- | ------- |
 | `version` | `1` | Config schema version |
 | `defaults.lazy` | `false` \| `true` \| `"after-start"` | Default when a spec omits `lazy` (default: `true`) |
-| `auto` | boolean | Enable keyword/event auto-load (default: `true`) |
+| `auto` | boolean | Enable keyword/event auto-load (new config: `false`; omitted in an existing config: `true`) |
 | `autoLoadLimit` | integer | Maximum packages loaded before one agent turn (default: `1`) |
 | `afterStartBatchSize` | integer | Packages loaded in one after-start event-loop slice (default: `1`) |
 | `afterStartDelayMs` | integer | Minimum delay between after-start slices in milliseconds (default: `0`) |
@@ -363,7 +387,8 @@ Here's a full example (also in [`examples/lazy.json`](./examples/lazy.json)):
 | `afterStartPauseDuringTurn` | boolean | Hold the after-start queue while the agent is working (default: `true`) |
 | `afterStartAdaptiveYield` | boolean | Yield at least as long as the previous slice blocked the event loop, capped at 250 ms (default: `true`) |
 | `afterStartPrefetch` | boolean | Import the next slice's modules while the current one activates (default: `true`) |
-| `specs` | array | Package load catalog |
+| `bootQuiet` | boolean | Send routine startup notices to `logs/pi-lazy.log` instead of chat (default: `true`) |
+| `specs` | array | Package load catalog (empty in a new config) |
 
 ### Keeping startup smooth
 
@@ -491,7 +516,8 @@ So declare the commands and tools you actually want to trigger a load:
 | `/lazy snapshot` | List saved snapshots (name, spec/package counts, saved-at) |
 | `/lazy delete <name>` | Delete one saved snapshot (bare `/lazy delete` lists what can be deleted) |
 | `/lazy restore <name>` | **Replace** the current scheme with a saved snapshot, then migrate |
-| `/lazy doctor` | Diagnose catalog vs settings vs runtime inconsistencies (invalid lazy values, duplicates, un-migrated entries, poisoned loads) |
+| `/lazy doctor` | Diagnose catalog/settings/runtime inconsistencies and show initialization replay warnings |
+| `/lazy quiet on\|off` | Toggle quiet startup notices; failures still surface |
 | `/lazy config` | Print the absolute path to `lazy.json` |
 | `/lazy profile` | Show in-session catalog, resolution, and load timings |
 
@@ -499,7 +525,8 @@ Tab completion is available for subcommands, `load <name>`, snapshot names after
 
 ### Statusline
 
-pi-lazy sets a UI status string like:
+pi-lazy publishes a status string for integrations such as the maintainer's persona-loader widget;
+it does not set Pi's bottom status bar itself. With a compatible widget it looks like:
 
 ```text
 lazy 2↑ 3· 4⚡
@@ -772,12 +799,27 @@ Edit `settings.json`: change that entry back to a plain string source (or remove
 | TS extension fails to import | Pi (or its deps) must provide **jiti**; JS/`dist` packages load via native `import` |
 | Broken settings after migrate | Restore `~/.pi/agent/settings.json.bak.lazy-<timestamp>` |
 | Want a clean slate mid-session | No unload in v1 — use `/reload` or restart Pi |
+| Package says `loaded` but initialization seems incomplete | Run `/lazy doctor` to check `session_start` / `resources_discover` replay warnings |
 
 Startup tip: if managed packages aren't module-lazy yet, pi-lazy notifies you once:
 
 ```text
 pi-lazy: run /lazy migrate then restart for true module-lazy
 ```
+
+### Initialization warnings
+
+`/lazy doctor` retains error messages from the `session_start` and `resources_discover` handlers
+replayed during a late load. Each warning names the package and phase, for example:
+
+```text
+! web: 初始化警告 (loaded) session_start: initialization failed
+```
+
+These handlers remain best-effort: later handlers still run, and the package stays `loaded` if its
+factories succeeded. A warning does not trigger a retry or unload. It is kept in memory for this
+process, not written to `lazy.json`; it covers late-load replay, not events dispatched by Pi later.
+A factory failure remains an `error` / `poisoned` load failure, reported separately.
 
 ## Limits (v1)
 
@@ -884,7 +926,7 @@ When `@rahularya01/pi-lazy` gets a new commit:
 1. `git remote add upstream git@github.com:Rahularya01/pi-lazy.git` (one-time).
 2. `git fetch upstream`.
 3. Identify the upstream commit range since `fd4910a` (the fork base).
-4. Cherry-pick onto `main`, run `npm test`, then patch-release as `0.5.x`.
+4. Apply compatible changes, run `npm test`, then include them in the next patch release.
 
 ### Manual publish (fallback)
 

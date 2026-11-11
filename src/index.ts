@@ -1251,6 +1251,9 @@ function runDoctor(agentDir: string, rt: Runtime) {
   if (rt.entries && typeof rt.entries.values === "function") {
     const all = [...rt.entries.values()];
     for (const e of all) {
+      for (const warning of e.initializationWarnings ?? []) {
+        lines.push(`! ${e.spec.name}: 初始化警告 (${e.state}) ${warning}`);
+      }
       if (e.state === "error" || e.state === "poisoned") {
         lines.push(`X ${e.spec.name}: 加载失败 (${e.state}) ${e.error ?? ""}`.trim());
       }

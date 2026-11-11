@@ -10,7 +10,7 @@
 > **环境事实（改文件前先记住这几条）**
 > - pi **1.2.0** / node **v24.20.0** / Windows · Git Bash
 > - `C:\Users\32203\.pi\agent` 是指向 `E:\pi-agent\agent` 的 **junction**（inode 相同）→ **两边是同一份文件**，不存在"改错副本"，但也别当两份去改
-> - `dist/index.js` 是 **esbuild bundle**；`src/*.ts` 是上游源码。我们**只改 bundle**（`package.json` 的 `scripts.build` 就是 esbuild）
+> - `dist/index.js` 是 **esbuild bundle**；行为修改写在 `src/*.ts`，再用 `npm run build` 重建并一并提交产物，不直接改 bundle
 > - `README.md` / `CHANGELOG.md` **已独立维护**（fork 特性都写进去了）；早期「上游原版、故意不动」的说法作废 —— 现在跟随 fork 自己的 release 更新
 
 ---
@@ -68,7 +68,7 @@ test -f E:/pi-agent/agent/certs/github-mcp-ca.pem && echo 'CA bundle ✓'   # �
 
 **结论口径**：
 - 上游**已修**（检测命令无命中 / 已含该符号）→ **删掉我们的补丁，跟随上游**
-- 上游**未修** → 按下面「改法」把补丁抄回本地 `dist/index.js`
+- 上游**未修** → 按下面「改法」在 `src/` 保留相应逻辑，再用 `npm run build` 重建 `dist/index.js`
 - 上游**改了附近代码**（锚点找不到）→ 别硬套，先看上游新逻辑，再决定补丁是否还需要
 
 ---
@@ -96,8 +96,8 @@ test -f E:/pi-agent/agent/certs/github-mcp-ca.pem && echo 'CA bundle ✓'   # �
 | P17 | `dist` ← `src/{index,resolve}.ts` | settings 追加前的 `localSettingsAdded` 去重改用 `sourcesMatch`（realpath 归一），修掉 junction 路径（`C:\`）与记录的真实路径（`E:\`）互不相等、重复追加 `settings.packages` 条目；`sourcesMatch` 对非字符串入参兜底不再抛错 | ❌ 上游无 |
 | P18 | `dist` ← `src/index.ts` | 新增 `/lazy set <name> true\|false\|after-start`：变更单个 spec 的 `lazy` 字段 + 备份 `lazy.json` + `migrate` 对齐 settings + 就地刷新状态；名字/模式两级 Tab 补全；歧义子串拒绝而非静默取首个 | ❌ 上游无 |
 
-> 上游源码是 `src/*.ts`（构建产物 `dist/index.js`）；我们改的是 **bundle 后的 `dist/index.js`**。
-> 抄补丁时可以直接改 dist；若想改源码重建，`package.json` 里的 `scripts.build` 是 esbuild 打包。
+> 源码是 `src/*.ts`，构建产物是 `dist/index.js`；补丁应在源码中维护。
+> 以下记录保留历史定位，应用时先修改对应源码，再执行 `npm run build`，不要直接修改 dist。
 
 ---
 

@@ -11,6 +11,21 @@ How to read this file:
 - **Patches (P1–P11)** — the canonical IDs we use across source, dist, and `LOCAL-PATCHES.md`
   for traceability. New patches get the next number; renumbering never happens.
 
+## 0.6.5 — 2026-11-11
+
+### Added
+
+- `/lazy doctor` now shows per-package initialization warnings from late-load `session_start` and
+  `resources_discover` replay. Warnings remain in memory for the process; successful factories still
+  count as loaded, later handlers continue, and repeated load requests do not rerun initialization.
+
+### Changed
+
+- README now matches new-config defaults (`auto: false`, empty catalog), all four resource filters
+  written by migrate, the minimum Pi version, and status-widget behavior. The fork's last-commit
+  and CI badges are visible alongside the upstream badge.
+- Maintenance notes now consistently direct changes to `src/` followed by rebuilding `dist/index.js`.
+
 ## 0.6.4 — 2026-11-01
 
 ### Added

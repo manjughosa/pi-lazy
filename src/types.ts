@@ -79,6 +79,8 @@ export interface ResolvedEntry {
 	moduleLazyReady: boolean;
 	state: SpecState;
 	error?: string;
+	/** Best-effort initialization replay failures; retained for /lazy doctor. */
+	initializationWarnings?: string[];
 	loadedAt?: number;
 	loadMs?: number;
 	loadedTools?: string[];

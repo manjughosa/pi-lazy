@@ -461,6 +461,7 @@ export async function loadResolvedEntry(
 	entry.state = "loading";
 	const loadPromise = (async (): Promise<LoadResult> => {
 		const started = Date.now();
+		entry.initializationWarnings = [];
 		const track: LoadTrack = {
 			tools: [],
 			commands: [],
@@ -498,6 +499,7 @@ export async function loadResolvedEntry(
 						await handler(event, ctx);
 					} catch (err) {
 						const message = err instanceof Error ? err.message : String(err);
+						entry.initializationWarnings.push(`session_start: ${message}`);
 						console.error(`[pi-lazy] session_start handler error in ${spec.name}: ${message}`);
 					}
 				}
@@ -509,8 +511,9 @@ export async function loadResolvedEntry(
 				for (const handler of track.resourcesDiscoverHandlers) {
 					try {
 						await handler(event, ctx);
-					} catch {
-						/* ignore */
+					} catch (err) {
+						const message = err instanceof Error ? err.message : String(err);
+						entry.initializationWarnings.push(`resources_discover: ${message}`);
 					}
 				}
 			}

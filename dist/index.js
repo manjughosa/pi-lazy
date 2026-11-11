@@ -594,6 +594,7 @@ async function loadResolvedEntry(entry, pi, ctx, deps) {
   entry.state = "loading";
   const loadPromise = (async () => {
     const started = Date.now();
+    entry.initializationWarnings = [];
     const track = {
       tools: [],
       commands: [],
@@ -624,6 +625,7 @@ async function loadResolvedEntry(entry, pi, ctx, deps) {
             await handler(event, ctx);
           } catch (err) {
             const message = err instanceof Error ? err.message : String(err);
+            entry.initializationWarnings.push(`session_start: ${message}`);
             console.error(`[pi-lazy] session_start handler error in ${spec.name}: ${message}`);
           }
         }
@@ -633,7 +635,9 @@ async function loadResolvedEntry(entry, pi, ctx, deps) {
         for (const handler of track.resourcesDiscoverHandlers) {
           try {
             await handler(event, ctx);
-          } catch {
+          } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            entry.initializationWarnings.push(`resources_discover: ${message}`);
           }
         }
       }
@@ -1958,6 +1962,9 @@ function runDoctor(agentDir, rt) {
   if (rt.entries && typeof rt.entries.values === "function") {
     const all = [...rt.entries.values()];
     for (const e of all) {
+      for (const warning of e.initializationWarnings ?? []) {
+        lines.push(`! ${e.spec.name}: \u521D\u59CB\u5316\u8B66\u544A (${e.state}) ${warning}`);
+      }
       if (e.state === "error" || e.state === "poisoned") {
         lines.push(`X ${e.spec.name}: \u52A0\u8F7D\u5931\u8D25 (${e.state}) ${e.error ?? ""}`.trim());
       }

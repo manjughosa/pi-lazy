@@ -230,6 +230,61 @@ test("concurrent callers share one factory activation", async () => {
 	assert.equal((globalThis as any).__piLazyConcurrent, 1);
 });
 
+test("doctor retains initialization warnings without failing or reactivating loaded packages", async (t) => {
+	t.mock.method(console, "error", () => {});
+	const agent = tempDir();
+	const warned = join(agent, "warned");
+	const clean = join(agent, "clean");
+	createPackage(warned, {
+		"index.mjs": `export default function(pi) {
+			pi.on("session_start", async () => { throw new Error("startup failed"); });
+			pi.on("session_start", () => { pi.registerTool({ name: "after_start" }); });
+			pi.on("resources_discover", async () => { throw "discovery failed"; });
+			pi.on("resources_discover", () => { pi.registerTool({ name: "after_discover" }); });
+		}`,
+	});
+	createPackage(clean, {
+		"index.mjs": `export default function(pi) {
+			pi.on("session_start", () => {});
+			pi.on("resources_discover", () => {});
+		}`,
+	});
+	writeJson(join(agent, "lazy.json"), {
+		version: 1,
+		managerCompat: false,
+		specs: [
+			{ name: "warned", source: warned, lazy: true },
+			{ name: "clean", source: clean, lazy: true },
+		],
+	});
+	writeJson(join(agent, "settings.json"), {
+		packages: [{ source: warned, extensions: [] }, { source: clean, extensions: [] }],
+	});
+	const pi = mockPi();
+	createPiLazy(pi.api, agent);
+	const lazy = pi.commands.get("lazy");
+	await lazy.handler("doctor", pi.ctx);
+	assert.doesNotMatch(pi.notifications.at(-1)!.message, /初始化警告/);
+	await lazy.handler("load warned", pi.ctx);
+	await lazy.handler("load clean", pi.ctx);
+	assert.ok(pi.tools.has("after_start"));
+	assert.ok(pi.tools.has("after_discover"));
+	await lazy.handler("list", pi.ctx);
+	assert.match(pi.notifications.at(-1)!.message, /loaded\s+warned/);
+	assert.match(pi.notifications.at(-1)!.message, /loaded\s+clean/);
+	await lazy.handler("doctor", pi.ctx);
+	const report = pi.notifications.at(-1)!.message;
+	assert.match(report, /! warned: 初始化警告 \(loaded\) session_start: startup failed/);
+	assert.match(report, /! warned: 初始化警告 \(loaded\) resources_discover: discovery failed/);
+	assert.equal(report.match(/初始化警告/g)?.length, 2);
+	assert.doesNotMatch(report, /! clean: 初始化警告|加载失败/);
+	const handlerCount = pi.handlers.get("session_start")!.length;
+	await lazy.handler("load warned", pi.ctx);
+	assert.equal(pi.handlers.get("session_start")!.length, handlerCount);
+	await lazy.handler("doctor", pi.ctx);
+	assert.equal(pi.notifications.at(-1)!.message, report);
+});
+
 test("dependency cycles return an explicit error", async () => {
 	const root = tempDir();
 	createPackage(root, { "index.mjs": "export default () => {}" });
