@@ -21,7 +21,7 @@ import {
 	saveConfig,
 } from "./config.ts";
 import { loadResolvedEntry, prefetchEntry } from "./loader.ts";
-import { migrateSettings } from "./migrate.ts";
+import { migrateSettings, RESOURCE_KEYS } from "./migrate.ts";
 import { isModuleLazyInSettings, resolveSpecPaths, sourcesMatch, findSettingsPackageIndices, discoverSpecsFromSettings, discoverLocalExtensions, normalizeSourceKey, npmPackageName, resolvePackageRoot, probeStaticCommands } from "./resolve.ts";
 import { performance } from "node:perf_hooks";
 import type { LazyConfig, LazyMode, LazySpec, LoadResult, ResolvedEntry } from "./types.ts";
@@ -652,13 +652,14 @@ function rescueNative(agentDir: string): RescueResult {
 					if (src && Array.isArray(obj.extensions)) keptOverrides.push(src);
 					return entry;
 				}
-				const { extensions, ...rest } = obj;
-				if (typeof rest.source === "string") {
-					handedBack.push(rest.source);
-					return rest.source;
+				const restored = { ...obj };
+				for (const key of RESOURCE_KEYS) {
+					if (Array.isArray(restored[key]) && (restored[key] as unknown[]).length === 0) delete restored[key];
 				}
-				handedBack.push("(unnamed)");
-				return rest;
+				if (RESOURCE_KEYS.some((key) => Array.isArray(restored[key]))) keptOverrides.push(String(restored.source ?? "(unnamed)"));
+				if (typeof restored.source === "string") handedBack.push(restored.source);
+				else handedBack.push("(unnamed)");
+				return Object.keys(restored).length === 1 && typeof restored.source === "string" ? restored.source : restored;
 			});
 			atomicWriteJson(settingsPath, settings);
 		}
@@ -959,9 +960,18 @@ function disablePackage(agentDir: string, name: string): DisableResult {
 	const settingsPath = getSettingsPath(agentDir);
 	const config = loadConfig(agentDir);
 
+	const bySubstring = config.specs.filter((s) => s.name.toLowerCase().includes(name.toLowerCase()));
+	if (bySubstring.length > 1 && !config.specs.some((s) => s.name === name || sourcesMatch(s.source, name))) {
+		return {
+			ok: false,
+			droppedFromSettings: false,
+			backups: [],
+			error: `'${name}' is ambiguous — matches: ${bySubstring.map((s) => s.name).join(", ")}`,
+		};
+	}
 	const spec = config.specs.find((s) => s.name === name)
 		?? config.specs.find((s) => sourcesMatch(s.source, name))
-		?? config.specs.find((s) => s.name.toLowerCase().includes(name.toLowerCase()));
+		?? bySubstring[0];
 	if (!spec) {
 		// Not in the catalog: already disabled, or simply a name that was never
 		// tracked. Either way the requested state already holds. The roster is the
@@ -1770,7 +1780,7 @@ async function runAfterStart(pi: ExtensionAPI, rt: Runtime, ctx: ExtensionContex
 	const stale = () => rt.queueCancelled || generation !== rt.sessionGeneration;
 
 	for (let i = 0; i < queue.length && !stale(); i += batchSize) {
-		await waitWhilePaused(rt, generation);
+		if (rt.config.afterStartPauseDuringTurn !== false) await waitWhilePaused(rt, generation);
 		if (stale()) return;
 
 		const batch = queue.slice(i, i + batchSize);
@@ -1998,7 +2008,7 @@ export function createPiLazy(pi: ExtensionAPI, agentDir = getAgentDir()) {
 			}
 
 			if (sub === "quiet") {
-				const arg = (args ?? "").trim().toLowerCase();
+				const arg = (rest[0] ?? "").toLowerCase();
 				if (arg === "on" || arg === "off") {
 					rt.config.bootQuiet = arg === "on";
 					try {

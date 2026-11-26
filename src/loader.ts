@@ -462,6 +462,7 @@ export async function loadResolvedEntry(
 	const loadPromise = (async (): Promise<LoadResult> => {
 		const started = Date.now();
 		entry.initializationWarnings = [];
+		entry.deferredResources = undefined;
 		const track: LoadTrack = {
 			tools: [],
 			commands: [],
@@ -505,16 +506,30 @@ export async function loadResolvedEntry(
 				}
 			}
 
-			// Best-effort resources_discover (skills/prompts already eager if not filtered)
+			// Pi only applies resources_discover results through its own session lifecycle.
+			// There is no public late-resource API, so retain the paths and make the
+			// eager-mode requirement visible instead of silently reporting full success.
 			if (ctx && track.resourcesDiscoverHandlers.length > 0) {
 				const event = { type: "resources_discover" as const, cwd: ctx.cwd, reason: "startup" as const };
+				const deferred = { skillPaths: [] as string[], promptPaths: [] as string[], themePaths: [] as string[] };
 				for (const handler of track.resourcesDiscoverHandlers) {
 					try {
-						await handler(event, ctx);
+						const result = await handler(event, ctx);
+						for (const key of ["skillPaths", "promptPaths", "themePaths"] as const) {
+							const paths = result?.[key];
+							if (Array.isArray(paths)) deferred[key].push(...paths.filter((path): path is string => typeof path === "string"));
+						}
 					} catch (err) {
 						const message = err instanceof Error ? err.message : String(err);
 						entry.initializationWarnings.push(`resources_discover: ${message}`);
 					}
+				}
+				if (deferred.skillPaths.length + deferred.promptPaths.length + deferred.themePaths.length > 0) {
+					entry.deferredResources = deferred;
+					const summary = `${deferred.skillPaths.length} skill, ${deferred.promptPaths.length} prompt, ${deferred.themePaths.length} theme`;
+					const warning = `resources_discover: ${summary} path(s) returned but not applied; set ${spec.name} to lazy:false and /reload to let Pi register them`;
+					entry.initializationWarnings.push(warning);
+					console.error(`[pi-lazy] ${spec.name}: ${warning}`);
 				}
 			}
 

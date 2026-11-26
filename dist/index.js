@@ -595,6 +595,7 @@ async function loadResolvedEntry(entry, pi, ctx, deps) {
   const loadPromise = (async () => {
     const started = Date.now();
     entry.initializationWarnings = [];
+    entry.deferredResources = void 0;
     const track = {
       tools: [],
       commands: [],
@@ -632,13 +633,25 @@ async function loadResolvedEntry(entry, pi, ctx, deps) {
       }
       if (ctx && track.resourcesDiscoverHandlers.length > 0) {
         const event = { type: "resources_discover", cwd: ctx.cwd, reason: "startup" };
+        const deferred = { skillPaths: [], promptPaths: [], themePaths: [] };
         for (const handler of track.resourcesDiscoverHandlers) {
           try {
-            await handler(event, ctx);
+            const result = await handler(event, ctx);
+            for (const key of ["skillPaths", "promptPaths", "themePaths"]) {
+              const paths = result?.[key];
+              if (Array.isArray(paths)) deferred[key].push(...paths.filter((path) => typeof path === "string"));
+            }
           } catch (err) {
             const message = err instanceof Error ? err.message : String(err);
             entry.initializationWarnings.push(`resources_discover: ${message}`);
           }
+        }
+        if (deferred.skillPaths.length + deferred.promptPaths.length + deferred.themePaths.length > 0) {
+          entry.deferredResources = deferred;
+          const summary = `${deferred.skillPaths.length} skill, ${deferred.promptPaths.length} prompt, ${deferred.themePaths.length} theme`;
+          const warning = `resources_discover: ${summary} path(s) returned but not applied; set ${spec.name} to lazy:false and /reload to let Pi register them`;
+          entry.initializationWarnings.push(warning);
+          console.error(`[pi-lazy] ${spec.name}: ${warning}`);
         }
       }
       if (track.tools.length > 0 && typeof pi.getActiveTools === "function" && typeof pi.setActiveTools === "function") {
@@ -710,7 +723,8 @@ function npmPackageName(source) {
     }
     return rest.split("@")[0] ?? rest;
   }
-  if (!source.includes(":") && !source.startsWith(".") && !source.startsWith("/")) {
+  const windowsAbsolute = /^[A-Za-z]:[\\/]/.test(source) || source.startsWith("\\\\");
+  if (!source.includes(":") && !source.startsWith(".") && !source.startsWith("/") && !source.startsWith("~") && !windowsAbsolute) {
     return source.startsWith("@") ? source.match(/^(@[^/]+\/[^@]+)/)?.[1] ?? source : source.split("@")[0];
   }
   return null;
@@ -740,8 +754,10 @@ function resolvePackageRoot(source, agentDir = getAgentDir2(), cwd = process.cwd
     }
     return null;
   }
-  const local = resolve(cwd, source);
+  const local = resolve(agentDir, source);
   if (safeIsDirectory(local)) return local;
+  const legacy = resolve(cwd, source);
+  if (safeIsDirectory(legacy)) return legacy;
   return null;
 }
 function readPiManifest(packageRoot) {
@@ -869,17 +885,21 @@ function isModuleLazyInSettings(source, settingsPackages) {
   const match = matches[0];
   return !!match && typeof match === "object" && Array.isArray(match.extensions) && match.extensions.length === 0;
 }
-function normalizeSourceKey(source) {
+function normalizeSourceKey(source, agentDir = getAgentDir2(), cwd = process.cwd()) {
   const trimmed = source.trim();
   const npm = npmPackageName(trimmed);
   if (npm) return `npm:${trimmed.startsWith("npm:") ? trimmed.slice(4) : trimmed}`;
   try {
-    return realpathSync2(trimmed).replace(/[\\\/]+$/, "").toLowerCase();
+    return foldFilesystemCase(realpathSync2(resolvePackageRoot(trimmed, agentDir, cwd) ?? trimmed)).replace(/[\\\/]+$/, "");
   } catch {
-    return trimmed.replace(/[\\\/]+$/, "").toLowerCase();
+    return foldFilesystemCase(trimmed).replace(/[\\\/]+$/, "");
   }
 }
-function sourcesMatch(left, right) {
+function foldFilesystemCase(value) {
+  const windowsStyle = /^[A-Za-z]:[\\/]/.test(value) || value.startsWith("\\\\");
+  return process.platform === "win32" || windowsStyle ? value.toLowerCase() : value;
+}
+function sourcesMatch(left, right, agentDir = getAgentDir2(), cwd = process.cwd()) {
   if (typeof left !== "string" || typeof right !== "string") return false;
   const leftNpm = npmPackageIdentity(left);
   const rightNpm = npmPackageIdentity(right);
@@ -887,7 +907,7 @@ function sourcesMatch(left, right) {
     if (!leftNpm || !rightNpm || leftNpm.name !== rightNpm.name) return false;
     return !leftNpm.selector || !rightNpm.selector || leftNpm.selector === rightNpm.selector;
   }
-  return normalizeSourceKey(left) === normalizeSourceKey(right);
+  return normalizeSourceKey(left, agentDir, cwd) === normalizeSourceKey(right, agentDir, cwd);
 }
 function findSettingsPackageIndex(settingsPackages, source) {
   return findSettingsPackageIndices(settingsPackages, source)[0] ?? -1;
@@ -968,7 +988,7 @@ function discoverLocalExtensions(agentDir, existing) {
       }
     });
     if (usable.length === 0) continue;
-    const source = dir;
+    const source = "./" + relative(agentDir, dir).split(sep).join("/");
     if (covered.has(normalizeSourceKey(source))) continue;
     const name = specNameFromSource(source);
     found.push({
@@ -1521,13 +1541,14 @@ function rescueNative(agentDir) {
           if (src && Array.isArray(obj.extensions)) keptOverrides.push(src);
           return entry;
         }
-        const { extensions, ...rest } = obj;
-        if (typeof rest.source === "string") {
-          handedBack.push(rest.source);
-          return rest.source;
+        const restored = { ...obj };
+        for (const key of RESOURCE_KEYS) {
+          if (Array.isArray(restored[key]) && restored[key].length === 0) delete restored[key];
         }
-        handedBack.push("(unnamed)");
-        return rest;
+        if (RESOURCE_KEYS.some((key) => Array.isArray(restored[key]))) keptOverrides.push(String(restored.source ?? "(unnamed)"));
+        if (typeof restored.source === "string") handedBack.push(restored.source);
+        else handedBack.push("(unnamed)");
+        return Object.keys(restored).length === 1 && typeof restored.source === "string" ? restored.source : restored;
       });
       atomicWriteJson(settingsPath, settings);
     }
@@ -1737,7 +1758,16 @@ function disablePackage(agentDir, name) {
   const configPath = getLazyConfigPath(agentDir);
   const settingsPath = getSettingsPath(agentDir);
   const config = loadConfig(agentDir);
-  const spec = config.specs.find((s) => s.name === name) ?? config.specs.find((s) => sourcesMatch(s.source, name)) ?? config.specs.find((s) => s.name.toLowerCase().includes(name.toLowerCase()));
+  const bySubstring = config.specs.filter((s) => s.name.toLowerCase().includes(name.toLowerCase()));
+  if (bySubstring.length > 1 && !config.specs.some((s) => s.name === name || sourcesMatch(s.source, name))) {
+    return {
+      ok: false,
+      droppedFromSettings: false,
+      backups: [],
+      error: `'${name}' is ambiguous \u2014 matches: ${bySubstring.map((s) => s.name).join(", ")}`
+    };
+  }
+  const spec = config.specs.find((s) => s.name === name) ?? config.specs.find((s) => sourcesMatch(s.source, name)) ?? bySubstring[0];
   if (!spec) {
     return { ok: true, noop: true, droppedFromSettings: false, backups: [] };
   }
@@ -2396,7 +2426,7 @@ async function runAfterStart(pi, rt, ctx, generation) {
   const prefetch = rt.config.afterStartPrefetch !== false;
   const stale = () => rt.queueCancelled || generation !== rt.sessionGeneration;
   for (let i = 0; i < queue.length && !stale(); i += batchSize) {
-    await waitWhilePaused(rt, generation);
+    if (rt.config.afterStartPauseDuringTurn !== false) await waitWhilePaused(rt, generation);
     if (stale()) return;
     const batch = queue.slice(i, i + batchSize);
     const next = queue.slice(i + batchSize, i + batchSize * 2);
@@ -2569,7 +2599,7 @@ function createPiLazy(pi, agentDir = getAgentDir4()) {
         return;
       }
       if (sub === "quiet") {
-        const arg = (args ?? "").trim().toLowerCase();
+        const arg = (rest[0] ?? "").toLowerCase();
         if (arg === "on" || arg === "off") {
           rt.config.bootQuiet = arg === "on";
           try {

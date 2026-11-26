@@ -11,6 +11,20 @@ How to read this file:
 - **Patches (P1–P11)** — the canonical IDs we use across source, dist, and `LOCAL-PATCHES.md`
   for traceability. New patches get the next number; renumbering never happens.
 
+## 0.6.6 — 2026-11-26
+
+### Fixed
+
+- Late `resources_discover` return values are retained and reported with their skill/prompt/theme
+  counts and an explicit `lazy:false` + `/reload` requirement instead of being silently discarded.
+- `/lazy disable` refuses ambiguous package-name substrings instead of removing the first match.
+- `/lazy rescue` removes only empty lazy resource filters, preserving package metadata and explicit
+  exclusions in other resource types.
+- `/lazy quiet on|off` now persists the requested value.
+- `afterStartPauseDuringTurn: false` now allows the after-start queue to run during an agent turn.
+- Local extension discovery emits portable agent-relative sources; Windows drive/UNC paths are no
+  longer mistaken for npm package names, and POSIX path dedup remains case-sensitive.
+
 ## 0.6.5 — 2026-11-11
 
 ### Added

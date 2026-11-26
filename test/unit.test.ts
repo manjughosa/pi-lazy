@@ -115,6 +115,62 @@ test("config validation retains valid specs and rejects duplicate names", () => 
 	assert.ok(errors.some((message) => /duplicate spec name/.test(message)));
 });
 
+test("disable rejects ambiguous substrings without changing either config file", async () => {
+	const agent = tempDir();
+	writeJson(join(agent, "settings.json"), { packages: ["npm:pi-one", "npm:pi-two"] });
+	writeJson(join(agent, "lazy.json"), {
+		version: 1,
+		specs: [
+			{ name: "pi-one", source: "npm:pi-one", lazy: false },
+			{ name: "pi-two", source: "npm:pi-two", lazy: false },
+		],
+	});
+	const pi = mockPi();
+	createPiLazy(pi.api, agent);
+	await pi.commands.get("lazy").handler("disable pi", pi.ctx);
+	assert.deepEqual(JSON.parse(readFileSync(join(agent, "settings.json"), "utf8")).packages, ["npm:pi-one", "npm:pi-two"]);
+	assert.equal(JSON.parse(readFileSync(join(agent, "lazy.json"), "utf8")).specs.length, 2);
+	assert.ok(pi.notifications.some((item) => /ambiguous/.test(item.message) && item.type === "error"));
+});
+
+test("rescue removes only empty lazy filters and preserves package metadata and exclusions", async () => {
+	const agent = tempDir();
+	writeJson(join(agent, "settings.json"), {
+		packages: [
+			{ source: "npm:one", extensions: [], skills: [], prompts: [], themes: [], enabled: false },
+			{ source: "npm:two", extensions: [], skills: ["-keep"], prompts: [], themes: [] },
+		],
+	});
+	writeJson(join(agent, "lazy.json"), {
+		version: 1,
+		specs: [
+			{ name: "one", source: "npm:one", lazy: true },
+			{ name: "two", source: "npm:two", lazy: true },
+		],
+	});
+	const pi = mockPi();
+	createPiLazy(pi.api, agent);
+	await pi.commands.get("lazy").handler("rescue", pi.ctx);
+	assert.deepEqual(JSON.parse(readFileSync(join(agent, "settings.json"), "utf8")).packages, [
+		{ source: "npm:one", enabled: false },
+		{ source: "npm:two", skills: ["-keep"] },
+	]);
+	assert.deepEqual(JSON.parse(readFileSync(join(agent, "lazy.json"), "utf8")).specs, []);
+});
+
+test("quiet on and off persist the requested bootQuiet value", async () => {
+	const agent = tempDir();
+	writeJson(join(agent, "settings.json"), { packages: [] });
+	writeJson(join(agent, "lazy.json"), { version: 1, bootQuiet: true, specs: [] });
+	const pi = mockPi();
+	createPiLazy(pi.api, agent);
+	const lazy = pi.commands.get("lazy");
+	await lazy.handler("quiet off", pi.ctx);
+	assert.equal(JSON.parse(readFileSync(join(agent, "lazy.json"), "utf8")).bootQuiet, false);
+	await lazy.handler("quiet on", pi.ctx);
+	assert.equal(JSON.parse(readFileSync(join(agent, "lazy.json"), "utf8")).bootQuiet, true);
+});
+
 test("migration restores eager extensions without losing package metadata", () => {
 	const agent = tempDir();
 	writeJson(join(agent, "lazy.json"), { version: 1, specs: [{ name: "pkg", source: "npm:pkg", lazy: false }] });
@@ -285,6 +341,32 @@ test("doctor retains initialization warnings without failing or reactivating loa
 	assert.equal(pi.notifications.at(-1)!.message, report);
 });
 
+test("late resource discovery preserves returned paths and reports the eager-mode requirement", async () => {
+	const agent = tempDir();
+	const pkg = join(agent, "pkg");
+	createPackage(pkg, {
+		"index.mjs": `export default function(pi){
+			pi.on("resources_discover",()=>({
+				skillPaths:["/tmp/skill"],
+				promptPaths:["/tmp/prompt"],
+				themePaths:["/tmp/theme"]
+			}));
+		}`,
+	});
+	const entry = resolvedEntry({ name: "resources", source: pkg, lazy: true }, pkg, [join(pkg, "index.mjs")]);
+	const pi = mockPi();
+	const result = await loadResolvedEntry(entry, pi.api, pi.ctx, {
+		loadDependency: async () => ({ ok: true, name: "noop" }) as LoadResult,
+	});
+	assert.equal(result.ok, true);
+	assert.deepEqual(entry.deferredResources, {
+		skillPaths: ["/tmp/skill"],
+		promptPaths: ["/tmp/prompt"],
+		themePaths: ["/tmp/theme"],
+	});
+	assert.match(entry.initializationWarnings?.join("\n") ?? "", /1 skill.*1 prompt.*1 theme.*lazy:false.*\/reload/);
+});
+
 test("dependency cycles return an explicit error", async () => {
 	const root = tempDir();
 	createPackage(root, { "index.mjs": "export default () => {}" });
@@ -428,6 +510,26 @@ test("the after-start queue is held for the duration of an agent turn", async ()
 	assert.equal((globalThis as any).__piLazyTurn, 0, "must not load while a turn is active");
 	await pi.emit("agent_end", { type: "agent_end" });
 	await waitFor(() => (globalThis as any).__piLazyTurn === 1);
+});
+
+test("afterStartPauseDuringTurn false allows loading during an agent turn", async () => {
+	const agent = tempDir();
+	const pkg = join(agent, "pkg");
+	createPackage(pkg, { "index.mjs": "export default function(){ globalThis.__piLazyUnpaused=(globalThis.__piLazyUnpaused||0)+1; }" });
+	writeJson(join(agent, "lazy.json"), {
+		version: 1,
+		afterStartInitialDelayMs: 50,
+		afterStartPauseDuringTurn: false,
+		specs: [{ name: "pkg", source: pkg, lazy: "after-start" }],
+	});
+	writeJson(join(agent, "settings.json"), { packages: [{ source: pkg, extensions: [] }] });
+	(globalThis as any).__piLazyUnpaused = 0;
+	const pi = mockPi();
+	createPiLazy(pi.api, agent);
+	await pi.emit("session_start", { type: "session_start", reason: "startup" });
+	await pi.emit("before_agent_start", { type: "before_agent_start", prompt: "hello" });
+	await waitFor(() => (globalThis as any).__piLazyUnpaused === 1, 2_000);
+	await pi.emit("agent_end", { type: "agent_end" });
 });
 
 test("prefetched factories activate exactly once", async () => {

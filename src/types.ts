@@ -81,6 +81,12 @@ export interface ResolvedEntry {
 	error?: string;
 	/** Best-effort initialization replay failures; retained for /lazy doctor. */
 	initializationWarnings?: string[];
+	/** Unapplied paths returned by late resources_discover replay; native eager loading is required. */
+	deferredResources?: {
+		skillPaths: string[];
+		promptPaths: string[];
+		themePaths: string[];
+	};
 	loadedAt?: number;
 	loadMs?: number;
 	loadedTools?: string[];

@@ -29,8 +29,11 @@ export function npmPackageName(source: string): string | null {
 		}
 		return rest.split("@")[0] ?? rest;
 	}
-	// bare npm name
-	if (!source.includes(":") && !source.startsWith(".") && !source.startsWith("/")) {
+	// bare npm name — platform-native absolute paths (drive-rooted, UNC) are local
+	// paths, not package names; otherwise a Windows UNC share would be probed
+	// under npm/node_modules and silently resolve to null.
+	const windowsAbsolute = /^[A-Za-z]:[\\/]/.test(source) || source.startsWith("\\\\");
+	if (!source.includes(":") && !source.startsWith(".") && !source.startsWith("/") && !source.startsWith("~") && !windowsAbsolute) {
 		return source.startsWith("@") ? (source.match(/^(@[^/]+\/[^@]+)/)?.[1] ?? source) : source.split("@")[0]!;
 	}
 	return null;
@@ -66,8 +69,12 @@ export function resolvePackageRoot(source: string, agentDir = getAgentDir(), cwd
 		return null;
 	}
 
-	const local = resolve(cwd, source);
+	// Global settings are agent-relative in Pi itself. Match that base first,
+	// retaining cwd fallback for legacy hand-written/project-local lazy specs.
+	const local = resolve(agentDir, source);
 	if (safeIsDirectory(local)) return local;
+	const legacy = resolve(cwd, source);
+	if (safeIsDirectory(legacy)) return legacy;
 	return null;
 }
 
@@ -243,21 +250,28 @@ export function isModuleLazyInSettings(source: string, settingsPackages: unknown
 	);
 }
 
-export function normalizeSourceKey(source: string): string {
+export function normalizeSourceKey(source: string, agentDir = getAgentDir(), cwd = process.cwd()): string {
 	const trimmed = source.trim();
 	const npm = npmPackageName(trimmed);
 	if (npm) return `npm:${trimmed.startsWith("npm:") ? trimmed.slice(4) : trimmed}`;
 	// P14: resolve local paths through junctions/symlinks so two spellings of the
 	// same directory (E:\pi-agent\agent\... vs C:\Users\...\.pi\agent\...) share one
 	// dedup key instead of becoming two specs / two roster entries.
+	// Case folding is filesystem-specific: Windows and drive/UNC spellings fold,
+	// but a POSIX filesystem may legitimately hold two case-differing packages.
 	try {
-		return realpathSync(trimmed).replace(/[\\\/]+$/, "").toLowerCase();
+		return foldFilesystemCase(realpathSync(resolvePackageRoot(trimmed, agentDir, cwd) ?? trimmed)).replace(/[\\\/]+$/, "");
 	} catch {
-		return trimmed.replace(/[\\\/]+$/, "").toLowerCase();
+		return foldFilesystemCase(trimmed).replace(/[\\\/]+$/, "");
 	}
 }
 
-export function sourcesMatch(left: string, right: string): boolean {
+function foldFilesystemCase(value: string): string {
+	const windowsStyle = /^[A-Za-z]:[\\/]/.test(value) || value.startsWith("\\\\");
+	return process.platform === "win32" || windowsStyle ? value.toLowerCase() : value;
+}
+
+export function sourcesMatch(left: string, right: string, agentDir = getAgentDir(), cwd = process.cwd()): boolean {
 	if (typeof left !== "string" || typeof right !== "string") return false;
 	const leftNpm = npmPackageIdentity(left);
 	const rightNpm = npmPackageIdentity(right);
@@ -265,7 +279,7 @@ export function sourcesMatch(left: string, right: string): boolean {
 		if (!leftNpm || !rightNpm || leftNpm.name !== rightNpm.name) return false;
 		return !leftNpm.selector || !rightNpm.selector || leftNpm.selector === rightNpm.selector;
 	}
-	return normalizeSourceKey(left) === normalizeSourceKey(right);
+	return normalizeSourceKey(left, agentDir, cwd) === normalizeSourceKey(right, agentDir, cwd);
 }
 
 export function findSettingsPackageIndex(settingsPackages: unknown[], source: string): number {
@@ -399,7 +413,9 @@ export function discoverLocalExtensions(agentDir: string, existing: LazySpec[]):
 		});
 		if (usable.length === 0) continue;
 
-		const source = dir;
+		// Emit an agent-relative, forward-slash source: an absolute one written on one
+		// OS cannot resolve on the other, even for the same shared agent directory.
+		const source = "./" + relative(agentDir, dir).split(sep).join("/");
 		if (covered.has(normalizeSourceKey(source))) continue;
 
 		const name = specNameFromSource(source);

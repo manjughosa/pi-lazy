@@ -42,7 +42,7 @@ function packageSource(spec: LazySpec): string {
  * "load none of that type", so writing all four is the only form that means
  * what `/lazy disable` says.
  */
-const RESOURCE_KEYS = ["extensions", "skills", "prompts", "themes"] as const;
+export const RESOURCE_KEYS = ["extensions", "skills", "prompts", "themes"] as const;
 
 /** True when every resource key is present and empty — the form migrate writes. */
 function isFullyDeferred(entry: Record<string, unknown>): boolean {

@@ -511,7 +511,7 @@ So declare the commands and tools you actually want to trigger a load:
 | `/lazy disable <name>` | Remove a package from the loading scheme (catalog spec + settings entry), then migrate. Leaves `node_modules` alone |
 | `/lazy enable <name>` | Restore a package disabled earlier (spec + settings entry from the newest `*.bak.disable-*` snapshot), then migrate |
 | `/lazy disable` / `/lazy enable` | List the full package roster recorded by the last `/lazy init` |
-| `/lazy rescue` | Hand every package back to native Pi: clear `extensions` filters and empty the catalog |
+| `/lazy rescue` | Hand every package back to native Pi: clear empty lazy filters for all four resource types, preserve other package settings, and empty the catalog |
 | `/lazy snapshot <name>` | Save the whole loading scheme under a name |
 | `/lazy snapshot` | List saved snapshots (name, spec/package counts, saved-at) |
 | `/lazy delete <name>` | Delete one saved snapshot (bare `/lazy delete` lists what can be deleted) |
@@ -581,8 +581,10 @@ When a trigger fires, pi-lazy runs through these steps:
 2. Read `package.json` → `pi.extensions` (same rules as Pi's own loader)
 3. Import the factory (`import()` for JS; **jiti** for TypeScript — from the Pi install)
 4. Call `factory(hostPi)` so tools, commands, and handlers attach to the **live** runtime
-5. Replay `session_start` (and best-effort `resources_discover`) handlers registered during that
-   late load
+5. Replay `session_start` and `resources_discover` handlers registered during that late load.
+   Pi has no public API for applying newly returned resource paths immediately, so pi-lazy retains
+   them and reports that the package must use `lazy:false` followed by `/reload`; only native eager
+   loading lets Pi discover those resources through its normal lifecycle
 6. Additively `setActiveTools` for any tools registered during the load
 
 Dependencies are loaded depth-first before the requested package.
@@ -819,11 +821,17 @@ replayed during a late load. Each warning names the package and phase, for examp
 These handlers remain best-effort: later handlers still run, and the package stays `loaded` if its
 factories succeeded. A warning does not trigger a retry or unload. It is kept in memory for this
 process, not written to `lazy.json`; it covers late-load replay, not events dispatched by Pi later.
-A factory failure remains an `error` / `poisoned` load failure, reported separately.
+When `resources_discover` returns skill, prompt or theme paths, the warning includes their counts
+and requires `lazy:false` plus `/reload`: Pi exposes no public late-resource API, and reloading
+while the package remains deferred does not run its handlers. A factory failure remains an `error`
+/ `poisoned` load failure, reported separately.
 
 ## Limits (v1)
 
 - **No mid-session unload** — loaded factories stay until `/reload` / process restart
+- **Late dynamic resources require eager mode** — returned `resources_discover` paths are retained
+  and reported by `/lazy doctor`; use `/lazy set <name> false` and `/reload` when a package needs
+  them, because Pi has no public late-resource API
 - A factory that fails after registering runtime state is marked **poisoned** and cannot be
   retried until restart
 - **Boot-critical packages** should stay `"lazy": false`
