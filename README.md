@@ -919,11 +919,13 @@ stage that is never approved stays pending — `npx npm@11 stage list` shows pen
 
 ### GitHub Actions
 - `.github/workflows/ci.yml` runs typecheck, build and the unit suite on every push.
-- `.github/workflows/publish.yml` publishes on a `v*` tag through **OIDC trusted publishing** — no
-  `NPM_TOKEN` secret exists to create or rotate.
+- `.github/workflows/publish.yml` publishes on a `v*` tag using **OIDC trusted publishing first**
+  and the repository's `NPM_TOKEN` Actions secret as an authentication fallback. Provenance still
+  uses GitHub OIDC, so the fallback does not disable provenance.
 - Bootstrap caveat: a trusted publisher can only be configured on a package that already exists, so
   the first release of a new name has to be published by hand (0.6.1 and 0.6.2 were). Afterwards, add
-  this repository and workflow under npmjs.com → package → Settings → Trusted publishing.
+  this repository and workflow under npmjs.com → package → Settings → Trusted publishing to make
+  OIDC the primary path; without it, the Actions secret keeps tag publishes fully automated.
 
 > The upstream `@rahularya01/pi-lazy` npm package is **not** touched; this fork publishes under its
 > own scope.
@@ -950,9 +952,13 @@ pi install npm:@zhuyanqi/pi-lazy
 ```
 
 ### Required npm-side setup
-- **Trusted publisher** for `@zhuyanqi/pi-lazy`: add this repository plus `publish.yml` under
-  npmjs.com → package → Settings → Trusted publishing. Until that entry exists, a tag push fails at
-  the publish step and the release has to be published by hand.
+- **Actions secret** for `@zhuyanqi/pi-lazy`: store a publish-capable granular token as the
+  repository's `NPM_TOKEN` secret. Accounts using `tfa.mode: auth-and-writes` need a token with
+  **Bypass two-factor authentication** enabled. This is the automatic fallback when trusted
+  publishing is absent or rejects the release.
+- **Trusted publisher (recommended)** for `@zhuyanqi/pi-lazy`: add this repository plus `publish.yml`
+  under npmjs.com → package → Settings → Trusted publishing. OIDC is attempted first; the Actions
+  secret is used only when that write is rejected with `E404`.
 
 ## License
 

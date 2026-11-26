@@ -84,22 +84,27 @@ jobs:
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "Publishing candidate ${NAME}@${PKG} (${TAG})"
 
-      # Authentication is OIDC trusted publishing, not a token. npm CLI 11.5.1+
-      # detects the GitHub OIDC environment and mints a short-lived credential, so
-      # there is no NPM_TOKEN secret to create, leak, or rotate.
-      #
-      # Bootstrap caveat: a trusted publisher can only be configured on a package
-      # that already exists, so the very first release of a brand-new package must
-      # be published by hand. After that, npmjs.com -> package -> Settings ->
-      # Trusted publishing -> add this repo + workflow, and every later `v*` tag
-      # publishes itself.
+      # Authentication is OIDC trusted publishing first, with the repository's
+      # NPM_TOKEN Actions secret as a fallback when trusted publishing is not
+      # configured. Provenance still uses GitHub OIDC. The token needs publish
+      # permission (and bypass-2FA for auth-and-writes accounts); it is never
+      # printed or committed.
       - name: Publish to npm
         if: steps.version.outputs.already_published != 'true'
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -o pipefail
           LOG="$(mktemp)"
           if npm publish --access public --provenance 2>&1 | tee "$LOG"; then
             exit 0
+          fi
+          if grep -q 'E404' "$LOG" && [ -n "${NPM_TOKEN:-}" ]; then
+            echo "OIDC publish is not authorized for this package; retrying with the NPM_TOKEN Actions secret"
+            export NODE_AUTH_TOKEN="$NPM_TOKEN"
+            if npm publish --access public --provenance 2>&1 | tee -a "$LOG"; then
+              exit 0
+            fi
           fi
           if grep -q 'TLOG_CREATE_ENTRY_ERROR' "$LOG" && grep -q 'equivalent entry already exists' "$LOG"; then
             echo "npm provenance transparency-log entry already exists; retrying without provenance"
